@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Crier · HOLDFAST</title>
+  <style>{{CSS}}</style>
+</head>
+<body class="page-reading">
+{{TOPBAR}}
+<main class="reader">
+  <div class="profile">
+    <h1 class="profile__name">{{DISPLAY_NAME}}</h1>
+    <div class="profile__handle">@{{HANDLE}}</div>
+    <p class="profile__summary">{{SUMMARY}}</p>
+    <div class="profile__stats">
+      <span><strong>{{NOTE_COUNT}}</strong> posts</span>
+      <span><strong>{{FOLLOWERS}}</strong> followers</span>
+    </div>
+  </div>
+
+  <section class="card composer">
+    <div class="card__body">
+      <form method="post" action="/api/notes">
+        <input type="hidden" name="csrf_token" value="{{CSRF}}">
+        <div class="field">
+          <label for="content">New post</label>
+          <textarea id="content" name="content" class="composer__body" maxlength="5000" placeholder="What's happening?" required></textarea>
+        </div>
+        <div class="composer__actions">
+          <button class="btn btn-primary" type="submit">Publish</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <div class="note-list">
+    {{ITEMS}}
+  </div>
+</main>
+</body>
+</html>

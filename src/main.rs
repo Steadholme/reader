@@ -1,16 +1,23 @@
-//! Reader — one container hosting the HOLDFAST reading surfaces (read-later / RSS).
+//! Reader — one container hosting the HOLDFAST reading surfaces (read-later / RSS / social).
 //!
-//! Each surface is its OWN library crate (Magpie/Current), reused verbatim: same schema, same
+//! Each surface is its OWN library crate (Magpie/Current/Crier), reused verbatim: same schema, same
 //! routes, same templates, same OWN database, same subdomain. This binary only adds a **Host-based
-//! vhost demux** so the estate runs ONE deployable instead of two. Sluice points `clip.w33d.xyz`
-//! and `rss.w33d.xyz` both at this container; each request is dispatched to the matching surface's
-//! router by its `Host` header. Because the surfaces keep their exact paths and separate databases,
-//! Magpie still clips into its own store and Current still polls feeds into its own — zero behavior
+//! vhost demux** so the estate runs ONE deployable instead of three. Sluice points `clip.w33d.xyz`,
+//! `rss.w33d.xyz` and `social.w33d.xyz` all at this container; each request is dispatched to the
+//! matching surface's router by its `Host` header. Because the surfaces keep their exact paths and
+//! separate databases, Magpie still clips into its own store, Current still polls feeds into its
+//! own, and Crier still serves the ActivityPub fediverse identity from its own — zero behavior
 //! change.
 //!
-//! Both surfaces read `DATABASE_URL` in their own `build_state_from_env`; in ONE process that would
-//! collide, so (exactly like Scriptoria) the demux constructs each state EXPLICITLY with its OWN
-//! DSN env var: `MAGPIE_DATABASE_URL` for clip, `CURRENT_DATABASE_URL` for rss.
+//! All three surfaces read `DATABASE_URL` in their own `build_state_from_env`; in ONE process that
+//! would collide, so (exactly like Scriptoria) the demux constructs each state EXPLICITLY with its
+//! OWN DSN env var: `MAGPIE_DATABASE_URL` for clip, `CURRENT_DATABASE_URL` for rss,
+//! `CRIER_DATABASE_URL` for social.
+//!
+//! Crier serves `social.w33d.xyz`: the SSO console (web `/`) PLUS the PUBLIC ActivityPub surface
+//! (`/.well-known`, `/users`, `/inbox`, `/outbox`). The demux only forwards by `Host`; crier's own
+//! router already separates its public vs SSO paths, so there is NO per-path auth logic in the
+//! demux — the gateway injects SSO identity for the web routes exactly as it did standalone.
 //!
 //! `healthcheck` subcommand: a dependency-free loopback `GET /healthz` (host-agnostic) used as the
 //! container HEALTHCHECK, so the image needs no curl.
@@ -36,6 +43,7 @@ const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8980";
 struct Vhosts {
     clip: Router,
     rss: Router,
+    social: Router,
 }
 
 #[tokio::main]
@@ -59,18 +67,19 @@ async fn main() {
     // standalone service did. A failure here is fatal (the surface cannot serve without its DB).
     let clip = build_clip().await.unwrap_or_else(|e| fatal("clip (magpie)", e));
     let rss = build_rss().await.unwrap_or_else(|e| fatal("rss (current)", e));
+    let social = build_social().await.unwrap_or_else(|e| fatal("social (crier)", e));
 
     let app = Router::new()
         // Host-agnostic liveness for the container HEALTHCHECK + estate probes.
         .route("/healthz", get(|| async { "ok" }))
         .fallback(dispatch)
-        .with_state(Vhosts { clip, rss });
+        .with_state(Vhosts { clip, rss, social });
 
     let addr: SocketAddr = bind_addr.parse().expect("invalid BIND_ADDR");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
-    tracing::info!(%addr, "Reader listening (clip/rss vhost demux)");
+    tracing::info!(%addr, "Reader listening (clip/rss/social vhost demux)");
     axum::serve(listener, app).await.expect("server error");
 }
 
@@ -82,7 +91,10 @@ async fn dispatch(State(v): State<Vhosts>, req: Request) -> Response {
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    // Match on the leading label (`clip`/`rss`), ignoring any port.
+    // Match on the leading label (`clip`/`rss`/`social`), ignoring any port. `crier` is also
+    // accepted for the social arm so an internal caller reaching the container by its service name
+    // (`http://crier:8980/...`, e.g. fediverse inbox delivery routed in-network) lands on Crier too;
+    // remote fediverse servers and webfinger clients reach it via the `social` gateway label.
     let label = host
         .split(':')
         .next()
@@ -93,6 +105,7 @@ async fn dispatch(State(v): State<Vhosts>, req: Request) -> Response {
     let router = match label {
         "clip" => v.clip,
         "rss" => v.rss,
+        "social" | "crier" => v.social,
         _ => return (StatusCode::NOT_FOUND, "unknown reading host").into_response(),
     };
     // `Router` is a tower `Service` (the exact `app(state).oneshot(req)` path the surfaces' own
@@ -141,6 +154,51 @@ async fn build_rss() -> Result<Router, String> {
     // standalone `main` starts it.
     current::spawn_poller(state.clone());
     Ok(current::app(state))
+}
+
+/// Build the social (Crier) surface router against `CRIER_DATABASE_URL`.
+///
+/// State is built EXPLICITLY (not via `crier::build_state_from_env`) because that path reads the
+/// bare `DATABASE_URL` + `CRIER_STORE`, which would collide with the `MAGPIE_`/`CURRENT_` surfaces
+/// in this single process. Instead we always connect+migrate Crier's OWN Postgres from
+/// `CRIER_DATABASE_URL`, then assemble the `AppState` Crier's `app()` expects exactly as Crier's own
+/// `build_state_from_env` does: `Config::from_env()`, the federation reqwest client, and the
+/// Watchtower audit sink (`AUDIT_ENABLED` + `WATCHTOWER_URL` + `AUDIT_INGEST_TOKEN`). Crier has no
+/// background poller/scheduler — outbound federation delivery is per-request fire-and-forget — so
+/// there is nothing extra to spawn here. The ring CryptoProvider installed once in `main` backs
+/// Crier's provider-less rustls reqwest client.
+async fn build_social() -> Result<Router, String> {
+    let dsn = require_env("CRIER_DATABASE_URL")?;
+    let pg = crier::store::PgStore::connect(&dsn)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    pg.migrate().await.map_err(|e| format!("migrate: {e}"))?;
+    tracing::info!("social (crier) store ready");
+    let audit = crier::audit::AuditSink::start(
+        env_truthy("AUDIT_ENABLED"),
+        &crier::config::env_nonempty("WATCHTOWER_URL").unwrap_or_default(),
+        crier::config::env_nonempty("AUDIT_INGEST_TOKEN").as_deref(),
+    );
+    let state = crier::AppState {
+        config: Arc::new(crier::config::Config::from_env()),
+        store: Arc::new(pg),
+        http: crier::federation::build_http_client(),
+        audit,
+    };
+    Ok(crier::app(state))
+}
+
+/// Interpret a boolean-ish env var (`on` / `true` / `1` / `yes`, case-insensitive). Mirrors the
+/// private `env_truthy` Crier uses in its own `build_state_from_env`, so audit is gated identically.
+fn env_truthy(key: &str) -> bool {
+    matches!(
+        std::env::var(key)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "on" | "true" | "1" | "yes"
+    )
 }
 
 /// Build Current's outbound HTTP client — a verbatim copy of Current's private `build_http_client`.

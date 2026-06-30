@@ -1,0 +1,54 @@
+[package]
+name = "crier"
+version = "0.1.0"
+edition = "2021"
+description = "Crier — single-user ActivityPub microblog (sovereign fediverse identity) for the HOLDFAST stack."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "crier"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crier"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP framework (shared with keystone/inkwell/relay/cellar): State/Path/Query/Form extractors,
+# server-rendered HTML for the SSO timeline, typed JSON for the ActivityPub surface.
+axum = "0.8"
+# Async runtime axum runs on. The Store trait is async: handlers `.await` it directly and
+# PgStore drives sqlx natively, so a worker thread is NEVER blocked (no sync-over-async bridge).
+# `rt-multi-thread` keeps the serving runtime parallel; `time` backs the delivery timeouts.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+# Erase the async Store trait methods so `Arc<dyn Store>` stays object-safe (the same seam as
+# the rest of the estate).
+async-trait = "0.1"
+# Deserialize the compose form body + inbound ActivityPub activities; serialize the actor /
+# outbox / webfinger JSON and the audit events.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Ergonomic error enum -> branded HTML error page (web) / status (ActivityPub).
+thiserror = "2"
+# Structured logging.
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# Epoch <-> RFC3339 for the ActivityPub `published` timestamps and the UTC date in the timeline
+# UI (std only — no C deps). `formatting` enables the well-known Rfc3339 description.
+time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
+# CSPRNG bytes for the double-submit CSRF token; `hex` encodes it (matches inkwell).
+getrandom = "0.2"
+hex = "0.4"
+# Best-effort outbound federation delivery (Accept on Follow, Create fan-out) + inbox discovery.
+# rustls (NO OpenSSL), JSON helpers. default-features off so no native-tls/openssl is dragged in —
+# the binary stays glibc-only, matching the estate posture. Federation degrades gracefully when a
+# remote is unreachable; the local microblog + actor/outbox JSON are correct regardless.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Portable PostgreSQL data layer. Runtime queries only (sqlx::query/Row) — NO compile-time macros,
+# so the build needs NO database. rustls TLS (no openssl). Standard SQL only, so the same
+# statements later run unchanged on FusionDB over pgwire.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+
+[dev-dependencies]
+# ServiceExt::oneshot drives the Router in-process for the end-to-end tests (no port bind).
+tower = { version = "0.5", features = ["util"] }

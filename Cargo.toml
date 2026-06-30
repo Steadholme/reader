@@ -16,6 +16,11 @@ path = "src/main.rs"
 # and Current still polls feeds into its own, each on its own subdomain.
 magpie = { path = "crates/magpie" }
 current = { path = "crates/current" }
+# Crier — single-user ActivityPub microblog (social.w33d.xyz): the SSO console (web `/`) PLUS the
+# PUBLIC fediverse surface (`/.well-known`, `/users`, `/inbox`, `/outbox`). Vendored verbatim; the
+# demux just forwards by Host (social/crier), crier's own router already separates SSO vs public
+# paths, so the demux adds no per-path auth.
+crier = { path = "crates/crier" }
 
 # HTTP framework — the outer Host-demux router + the per-surface routers returned by each crate's
 # `app()`. Same axum the surfaces use.

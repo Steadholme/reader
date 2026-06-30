@@ -1,0 +1,209 @@
+//! ActivityPub / WebFinger JSON document builders.
+//!
+//! Pure functions: each turns the [`Config`] + stored data into the exact JSON shape a fediverse
+//! server expects. They are transport-agnostic (no axum, no store) so they are trivially unit
+//! tested. Note CONTENT is HTML-escaped into a `<p>…</p>` fragment by [`content_to_html`], so a
+//! remote that renders our notes can never receive script/markup we did not intend.
+//!
+//! Federation NOTE: Crier serves a fully correct actor / outbox / WebFinger and accepts inbound
+//! activities, but it does NOT sign its outbound deliveries (HTTP Signatures would risk pulling
+//! OpenSSL). The actor therefore omits a `publicKey`; remote servers that require signed delivery
+//! will reject our pushes — that is the documented best-effort degradation. Inbound + local
+//! correctness is unaffected.
+
+use serde_json::{json, Value};
+
+use crate::config::Config;
+use crate::store::{Follower, Note};
+
+/// The ActivityStreams "public" magic collection every public post is addressed to.
+pub const PUBLIC: &str = "https://www.w3.org/ns/activitystreams#Public";
+
+/// The `application/activity+json` content type Crier serves all ActivityPub documents as.
+pub const ACTIVITY_JSON: &str = "application/activity+json";
+
+/// Escape note text into a safe single-paragraph HTML fragment. Newlines become `<br>`; every other
+/// character is HTML-escaped, so author text can never inject live markup downstream.
+pub fn content_to_html(content: &str) -> String {
+    let escaped = content
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+        .replace('\n', "<br>");
+    format!("<p>{escaped}</p>")
+}
+
+/// The WebFinger JRD for `acct:<actor>@<domain>` — links the handle to the actor document.
+pub fn webfinger(cfg: &Config) -> Value {
+    json!({
+        "subject": format!("acct:{}", cfg.handle()),
+        "aliases": [cfg.actor_url(), cfg.base_url() + "/"],
+        "links": [
+            {
+                "rel": "self",
+                "type": ACTIVITY_JSON,
+                "href": cfg.actor_url()
+            },
+            {
+                "rel": "http://webfinger.net/rel/profile-page",
+                "type": "text/html",
+                "href": cfg.base_url() + "/"
+            }
+        ]
+    })
+}
+
+/// The ActivityPub Actor (Person) document.
+pub fn actor(cfg: &Config) -> Value {
+    json!({
+        "@context": [
+            "https://www.w3.org/ns/activitystreams"
+        ],
+        "id": cfg.actor_url(),
+        "type": "Person",
+        "preferredUsername": cfg.actor,
+        "name": cfg.display_name,
+        "summary": cfg.summary,
+        "url": cfg.base_url() + "/",
+        "inbox": cfg.inbox_url(),
+        "outbox": cfg.outbox_url(),
+        "followers": cfg.followers_url(),
+        "manuallyApprovesFollowers": false,
+        "discoverable": true,
+        "endpoints": {
+            "sharedInbox": cfg.shared_inbox_url()
+        }
+    })
+}
+
+/// The ActivityStreams Note object for one stored note (dereferenceable at [`Config::note_url`]).
+pub fn note_object(cfg: &Config, note: &Note) -> Value {
+    let url = cfg.note_url(&note.id);
+    json!({
+        "id": url,
+        "type": "Note",
+        "attributedTo": cfg.actor_url(),
+        "content": content_to_html(&note.content),
+        "published": crate::rfc3339(note.created_at),
+        "url": url,
+        "to": [PUBLIC],
+        "cc": [cfg.followers_url()]
+    })
+}
+
+/// The `Create` activity that wraps a note in the outbox / outbound delivery.
+pub fn create_activity(cfg: &Config, note: &Note) -> Value {
+    let url = cfg.note_url(&note.id);
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{url}/activity"),
+        "type": "Create",
+        "actor": cfg.actor_url(),
+        "published": crate::rfc3339(note.created_at),
+        "to": [PUBLIC],
+        "cc": [cfg.followers_url()],
+        "object": note_object(cfg, note)
+    })
+}
+
+/// The outbox `OrderedCollection` of `Create` activities, newest-first.
+pub fn outbox(cfg: &Config, notes: &[Note], total: i64) -> Value {
+    let items: Vec<Value> = notes.iter().map(|n| create_activity(cfg, n)).collect();
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": cfg.outbox_url(),
+        "type": "OrderedCollection",
+        "totalItems": total,
+        "orderedItems": items
+    })
+}
+
+/// The followers `OrderedCollection` (actor ids only), newest-first.
+pub fn followers_collection(cfg: &Config, followers: &[Follower], total: i64) -> Value {
+    let items: Vec<Value> = followers.iter().map(|f| json!(f.actor)).collect();
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": cfg.followers_url(),
+        "type": "OrderedCollection",
+        "totalItems": total,
+        "orderedItems": items
+    })
+}
+
+/// An `Accept` activity acknowledging an inbound `Follow`. `follow` is echoed back verbatim as the
+/// object (per the ActivityPub spec) and `stamp` makes the activity id unique.
+pub fn accept_activity(cfg: &Config, follow: &Value, stamp: &str) -> Value {
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{}#accepts/{}", cfg.actor_url(), stamp),
+        "type": "Accept",
+        "actor": cfg.actor_url(),
+        "object": follow
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> Config {
+        let mut c = Config::dev();
+        c.actor = "w33d".to_string();
+        c.domain = "social.w33d.xyz".to_string();
+        c.display_name = "w33d".to_string();
+        c
+    }
+
+    #[test]
+    fn content_html_escapes_and_breaks() {
+        let h = content_to_html("hi <b>x</b>\nsecond & line");
+        assert_eq!(h, "<p>hi &lt;b&gt;x&lt;/b&gt;<br>second &amp; line</p>");
+        assert!(!h.contains("<b>"));
+    }
+
+    #[test]
+    fn webfinger_links_to_actor() {
+        let wf = webfinger(&cfg());
+        assert_eq!(wf["subject"], "acct:w33d@social.w33d.xyz");
+        assert_eq!(wf["links"][0]["rel"], "self");
+        assert_eq!(wf["links"][0]["type"], ACTIVITY_JSON);
+        assert_eq!(wf["links"][0]["href"], "https://social.w33d.xyz/users/w33d");
+    }
+
+    #[test]
+    fn actor_has_required_fields_and_no_public_key() {
+        let a = actor(&cfg());
+        assert_eq!(a["type"], "Person");
+        assert_eq!(a["id"], "https://social.w33d.xyz/users/w33d");
+        assert_eq!(a["preferredUsername"], "w33d");
+        assert_eq!(a["inbox"], "https://social.w33d.xyz/users/w33d/inbox");
+        assert_eq!(a["outbox"], "https://social.w33d.xyz/users/w33d/outbox");
+        assert_eq!(a["endpoints"]["sharedInbox"], "https://social.w33d.xyz/inbox");
+        // Degraded (unsigned) mode: no publicKey is advertised.
+        assert!(a.get("publicKey").is_none());
+    }
+
+    #[test]
+    fn outbox_wraps_notes_in_create() {
+        let c = cfg();
+        let note = Note {
+            id: "note_1".to_string(),
+            author_sub: "u_w33d".to_string(),
+            content: "hello world".to_string(),
+            visibility: "public".to_string(),
+            created_at: 1_700_000_000,
+        };
+        let ob = outbox(&c, std::slice::from_ref(&note), 1);
+        assert_eq!(ob["type"], "OrderedCollection");
+        assert_eq!(ob["totalItems"], 1);
+        let item = &ob["orderedItems"][0];
+        assert_eq!(item["type"], "Create");
+        assert_eq!(item["actor"], "https://social.w33d.xyz/users/w33d");
+        assert_eq!(item["object"]["type"], "Note");
+        assert_eq!(item["object"]["id"], "https://social.w33d.xyz/users/w33d/notes/note_1");
+        assert_eq!(item["object"]["content"], "<p>hello world</p>");
+        assert_eq!(item["to"][0], PUBLIC);
+    }
+}
