@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>River · Current · HOLDFAST</title>
+  <style>{{CSS}}</style>
+</head>
+<body class="page-console">
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="/" aria-label="HOLDFAST Current">
+        <span class="brand__glyph" aria-hidden="true">{{SHIELD}}</span>
+        <span class="brand__word">HOLDFAST</span>
+      </a>
+      <div class="topbar__right">{{USERBOX}}</div>
+    </div>
+  </header>
+
+  <main class="console console--narrow">
+    <div class="console__head console__head--row">
+      <div>
+        <h1>Your river</h1>
+        <p class="sub">Newest unread items across all your feeds · <span class="count-pill">{{UNREAD}}</span></p>
+      </div>
+      <form method="post" action="/read-all">
+        <input type="hidden" name="csrf_token" value="{{CSRF}}">
+        <button class="btn btn-secondary btn-sm" type="submit">Mark all read</button>
+      </form>
+    </div>
+
+    <section class="river">
+      {{ENTRIES}}
+    </section>
+  </main>
+</body>
+</html>

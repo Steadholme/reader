@@ -1,0 +1,41 @@
+[package]
+name = "reader"
+version = "0.1.0"
+edition = "2021"
+description = "Reader — one deployable hosting the HOLDFAST reading surfaces (read-later / RSS) behind a Host-based vhost demux. Each surface keeps its own database, routes, and subdomain; this binary just composes the two library crates so the estate runs one container instead of two."
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "reader"
+path = "src/main.rs"
+
+[dependencies]
+# The two reading surfaces, vendored as path-dep library crates and reused VERBATIM (their code,
+# schemas, routes, templates and tests are unchanged). Reader only adds the vhost demux, so each
+# surface behaves exactly as its standalone service did — Magpie still clips into its own database
+# and Current still polls feeds into its own, each on its own subdomain.
+magpie = { path = "crates/magpie" }
+current = { path = "crates/current" }
+
+# HTTP framework — the outer Host-demux router + the per-surface routers returned by each crate's
+# `app()`. Same axum the surfaces use.
+axum = "0.8"
+# Async runtime: connect/migrate the two Postgres stores at startup, spawn Current's feed poller,
+# then serve. `net` backs the dependency-free `healthcheck` subcommand's loopback probe.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+# `ServiceExt::oneshot` drives the chosen per-surface Router for one request inside the demux.
+tower = { version = "0.5", features = ["util"] }
+# Structured logging (shared with the surfaces).
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Current's `AppState` carries a `reqwest::Client` and Current builds it itself (its own
+# `build_http_client` is private). The demux constructs each surface's state EXPLICITLY (so each
+# uses its OWN DSN, never the colliding `DATABASE_URL`), so reader builds that client here exactly
+# as Current does — same crate versions/features as the vendored `current` crate, so the
+# `reqwest::Client` type unifies. rustls (ring) only — no openssl, no aws-lc/cmake — matching the
+# sqlx/reqwest crypto stack both surfaces already pin.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
+# The ring CryptoProvider installed process-wide for reqwest's rustls connector (Current's client
+# is built with the `-no-provider` reqwest feature, so the demux installs ring before building it).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

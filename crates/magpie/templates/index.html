@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Reading list · Magpie · HOLDFAST</title>
+  <style>{{CSS}}</style>
+</head>
+<body class="page-console">
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="/" aria-label="HOLDFAST Magpie">
+        <span class="brand__glyph" aria-hidden="true">{{SHIELD}}</span>
+        <span class="brand__word">HOLDFAST</span>
+      </a>
+      <div class="topbar__right">{{USERBOX}}</div>
+    </div>
+  </header>
+
+  <main class="console">
+    <div class="console__head">
+      <h1>Read later</h1>
+      <p class="sub">Clip web pages to read later. Magpie fetches each page, pulls out the readable text, and saves it to your list.</p>
+    </div>
+
+    <div class="layout">
+      <section class="reading">
+        <div class="tabs">{{TABS}}</div>
+        <ul class="clip-list">
+          {{LIST}}
+        </ul>
+      </section>
+
+      <aside class="rail">
+        <section class="card">
+          <div class="card__head"><h2>Save a link</h2></div>
+          <div class="card__body">
+            <form method="post" action="/clip" class="save-form">
+              <input type="hidden" name="csrf_token" value="{{CSRF}}">
+              <div class="field">
+                <label for="url">Page URL</label>
+                <input type="url" id="url" name="url" inputmode="url" autocomplete="off"
+                       placeholder="https://example.com/article" required>
+              </div>
+              <div class="actions">
+                <button class="btn btn-primary" type="submit">Save to reading list</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card__head"><h2>One-click bookmarklet</h2></div>
+          <div class="card__body">
+            <p class="hint">Drag this button to your bookmarks bar. Click it on any page to save it to HOLDFAST.</p>
+            <p class="bookmarklet-wrap">
+              <a class="btn btn-secondary bookmarklet" href="{{BOOKMARKLET_HREF}}"
+                 onclick="return false;" draggable="true">Save to HOLDFAST</a>
+            </p>
+            <p class="hint hint--muted">It opens a small tab that saves the current page through your single sign-on session.</p>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>

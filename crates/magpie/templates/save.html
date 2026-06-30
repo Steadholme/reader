@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Save to HOLDFAST · Magpie</title>
+  <style>{{CSS}}</style>
+</head>
+<body class="page-console">
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="/" aria-label="HOLDFAST Magpie">
+        <span class="brand__glyph" aria-hidden="true">{{SHIELD}}</span>
+        <span class="brand__word">HOLDFAST</span>
+      </a>
+      <div class="topbar__right">{{USERBOX}}</div>
+    </div>
+  </header>
+
+  <main class="console console--narrow">
+    <section class="card card--message">
+      <div class="card__body">
+        <h1 class="message-heading">Save this page?</h1>
+        <p class="save-url">{{URL_TEXT}}</p>
+        <form method="post" action="/clip" id="saveForm" class="save-confirm">
+          <input type="hidden" name="csrf_token" value="{{CSRF}}">
+          <input type="hidden" name="url" value="{{URL_ATTR}}">
+          <div class="actions actions--center">
+            <button class="btn btn-primary" type="submit" id="saveBtn" autofocus>Save to reading list</button>
+            <a class="btn btn-ghost" href="/">Cancel</a>
+          </div>
+        </form>
+        <p class="hint hint--muted" id="autonote">Saving…</p>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // One-click: auto-submit once on load. Refreshing is safe — re-saving an already-saved URL
+    // is de-duplicated server-side, never a duplicate clip.
+    (function () {
+      var f = document.getElementById('saveForm');
+      var note = document.getElementById('autonote');
+      if (f) { try { f.requestSubmit ? f.requestSubmit() : f.submit(); } catch (e) { if (note) { note.textContent = ''; } } }
+    })();
+  </script>
+</body>
+</html>

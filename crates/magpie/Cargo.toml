@@ -1,0 +1,53 @@
+[package]
+name = "magpie"
+version = "0.1.0"
+edition = "2021"
+description = "Magpie — read-later / web clipper for the HOLDFAST stack (SSO-gated; server-side fetch + readability extraction)."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "magpie"
+path = "src/lib.rs"
+
+[[bin]]
+name = "magpie"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP framework (shared with keystone/pastefire/cortex): Form/State/Path/Query extractors,
+# typed responses, server-rendered HTML.
+axum = "0.8"
+# Async runtime axum runs on. The Store + Fetcher traits are async: handlers `.await` them
+# directly and PgStore/HttpFetcher use sqlx/reqwest natively, so a worker thread is NEVER
+# blocked (no block_in_place, no sync-over-async bridge).
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net"] }
+# Erase the async Store/Fetcher trait methods so `Arc<dyn Store>` / `Arc<dyn Fetcher>` stay
+# object-safe (same seam as the rest of the estate; a fake fetcher drops in for tests).
+async-trait = "0.1"
+# Deserialize the HTML form bodies + the `?filter=` / `?u=` query strings.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Ergonomic error enums.
+thiserror = "2"
+# Structured logging.
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# Epoch -> UTC components for the "saved" timestamps (std only — no extra C deps).
+time = { version = "0.3", default-features = false, features = ["std"] }
+# CSPRNG (OsRng) for the short random clip id + the double-submit CSRF token.
+rand = "0.8"
+# Portable PostgreSQL data layer. Runtime queries only (sqlx::query/Row) — NO compile-time
+# macros, so the build needs NO database. rustls TLS (ring) — no openssl. The same standard SQL
+# later runs unchanged on FusionDB over pgwire.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+# Outbound HTTP(S) clipper client. rustls-tls (ring) — SAME crypto stack as sqlx, no openssl,
+# no native-tls. `gzip` lets the fetcher decode compressed pages. Redirects are handled
+# MANUALLY (Policy::none) so every hop is re-checked by the SSRF guard.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+# HTML parsing for the readability heuristic (pure Rust — html5ever under the hood). Used ONLY
+# to extract <title>/og:* + readable block text to PLAIN TEXT; remote HTML is NEVER rendered raw.
+scraper = "0.20"
+
+[dev-dependencies]
+# ServiceExt::oneshot drives the Router in-process for the end-to-end tests (no port bind).
+tower = { version = "0.5", features = ["util"] }

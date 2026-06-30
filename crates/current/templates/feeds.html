@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Feeds · Current · HOLDFAST</title>
+  <style>{{CSS}}</style>
+</head>
+<body class="page-console">
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="/" aria-label="HOLDFAST Current">
+        <span class="brand__glyph" aria-hidden="true">{{SHIELD}}</span>
+        <span class="brand__word">HOLDFAST</span>
+      </a>
+      <div class="topbar__right">{{USERBOX}}</div>
+    </div>
+  </header>
+
+  <main class="console console--narrow">
+    <div class="console__head">
+      <h1>Feeds</h1>
+      <p class="sub">Subscribe to any RSS 2.0 or Atom feed. Current polls them in the background and folds new items into your river.</p>
+    </div>
+
+    <section class="card">
+      <div class="card__head"><h2>Add a feed</h2></div>
+      <div class="card__body">
+        {{ERROR}}
+        <form method="post" action="/feeds" class="add-feed">
+          <input type="hidden" name="csrf_token" value="{{CSRF}}">
+          <input type="url" name="url" class="add-feed__url" inputmode="url" autocomplete="off"
+                 spellcheck="false" placeholder="https://example.com/feed.xml" required>
+          <button class="btn btn-primary" type="submit">Add feed</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card__head"><h2>Your subscriptions</h2></div>
+      <div class="card__body">
+        <ul class="feed-list">
+          {{FEEDS}}
+        </ul>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

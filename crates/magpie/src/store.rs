@@ -1,0 +1,472 @@
+//! Clip storage.
+//!
+//! `Store` is a small async trait with an in-memory and a PostgreSQL implementation, mirroring
+//! the pastefire/cortex seam: handlers depend only on the trait, so a FusionDB-backed store can
+//! drop in later. The PostgreSQL layer uses ONLY portable standard SQL (TEXT/BIGINT/BOOLEAN,
+//! PRIMARY KEY/NOT NULL/DEFAULT, parameterized queries, `INSERT .. ON CONFLICT`, plain indexes)
+//! and runtime queries (no compile-time macros), so the build needs NO database and the same
+//! statements later run unchanged on FusionDB over pgwire.
+//!
+//! The trait is async: the axum handlers `.await` it directly on the serving runtime, and
+//! `PgStore` drives sqlx natively — there is NO `block_in_place` and NO sync-over-async bridge.
+
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use thiserror::Error;
+
+use crate::config::LIST_LIMIT;
+use crate::model::{Clip, Filter};
+
+/// Storage failure surfaced to the handler layer (mapped to a 500 `server_error`).
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("store error: {0}")]
+    Backend(String),
+}
+
+/// Pluggable clip store. `create` is collision-aware on the id; per-row mutations
+/// (`mark_read`/`set_archived`/`delete`) are ownership-scoped (only the owner's row changes).
+#[async_trait]
+pub trait Store: Send + Sync {
+    /// Insert a clip. Returns `Ok(true)` when inserted, `Ok(false)` when the id already existed
+    /// (the caller retries with a new id). Idempotent at the id level.
+    async fn create(&self, clip: &Clip) -> Result<bool, StoreError>;
+
+    /// Fetch a clip by id (ownership is enforced by the caller against `owner_sub`).
+    async fn get(&self, id: &str) -> Result<Option<Clip>, StoreError>;
+
+    /// Find an owner's existing clip for an exact URL (de-dup: re-clipping a saved URL updates
+    /// the existing row instead of creating a duplicate).
+    async fn find_by_owner_url(&self, owner_sub: &str, url: &str)
+        -> Result<Option<Clip>, StoreError>;
+
+    /// An owner's clips for `filter`, newest-first, capped at [`LIST_LIMIT`].
+    async fn list(&self, owner_sub: &str, filter: Filter) -> Result<Vec<Clip>, StoreError>;
+
+    /// Mark an owner's clip read. Returns `true` when a row was updated.
+    async fn mark_read(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
+
+    /// Set the archived flag on an owner's clip. Returns `true` when a row was updated.
+    async fn set_archived(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        archived: bool,
+    ) -> Result<bool, StoreError>;
+
+    /// Delete an owner's clip. Returns `true` when a row was removed (existed AND owned).
+    async fn delete(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
+}
+
+// --------------------------------------------------------------------------------------
+// In-memory store (the default; keeps the whole service database-free for dev + tests).
+// --------------------------------------------------------------------------------------
+
+/// In-memory `Store`. The `Mutex<Vec<_>>` critical sections are fully synchronous (no `.await`
+/// held across the guard), so the std `Mutex` is correct here.
+#[derive(Default)]
+pub struct InMemoryStore {
+    clips: Mutex<Vec<Clip>>,
+}
+
+impl InMemoryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl Store for InMemoryStore {
+    async fn create(&self, clip: &Clip) -> Result<bool, StoreError> {
+        let mut clips = self.clips.lock().expect("clips lock poisoned");
+        if clips.iter().any(|c| c.id == clip.id) {
+            return Ok(false);
+        }
+        clips.push(clip.clone());
+        Ok(true)
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<Clip>, StoreError> {
+        let clips = self.clips.lock().expect("clips lock poisoned");
+        Ok(clips.iter().find(|c| c.id == id).cloned())
+    }
+
+    async fn find_by_owner_url(
+        &self,
+        owner_sub: &str,
+        url: &str,
+    ) -> Result<Option<Clip>, StoreError> {
+        let clips = self.clips.lock().expect("clips lock poisoned");
+        Ok(clips
+            .iter()
+            .find(|c| c.owner_sub == owner_sub && c.url == url)
+            .cloned())
+    }
+
+    async fn list(&self, owner_sub: &str, filter: Filter) -> Result<Vec<Clip>, StoreError> {
+        let clips = self.clips.lock().expect("clips lock poisoned");
+        let mut out: Vec<Clip> = clips
+            .iter()
+            .filter(|c| c.owner_sub == owner_sub && filter.matches(c))
+            .cloned()
+            .collect();
+        // Newest first; id as a deterministic tiebreak when saved_at collides (same second).
+        out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.id.cmp(&a.id)));
+        out.truncate(LIST_LIMIT);
+        Ok(out)
+    }
+
+    async fn mark_read(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        let mut clips = self.clips.lock().expect("clips lock poisoned");
+        match clips
+            .iter_mut()
+            .find(|c| c.id == id && c.owner_sub == owner_sub)
+        {
+            Some(c) => {
+                let changed = !c.read;
+                c.read = true;
+                Ok(changed)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn set_archived(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        archived: bool,
+    ) -> Result<bool, StoreError> {
+        let mut clips = self.clips.lock().expect("clips lock poisoned");
+        match clips
+            .iter_mut()
+            .find(|c| c.id == id && c.owner_sub == owner_sub)
+        {
+            Some(c) => {
+                c.archived = archived;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn delete(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        let mut clips = self.clips.lock().expect("clips lock poisoned");
+        let before = clips.len();
+        clips.retain(|c| !(c.id == id && c.owner_sub == owner_sub));
+        Ok(clips.len() != before)
+    }
+}
+
+// --------------------------------------------------------------------------------------
+// PostgreSQL-backed store (portable: standard SQL, runtime queries, no macros).
+// --------------------------------------------------------------------------------------
+//
+// Selected at runtime by `MAGPIE_STORE=postgres`. The `Store` trait is async, so each method
+// uses sqlx natively and the handlers `.await` it on the serving runtime — there is NO
+// `block_in_place` and NO sync-over-async, so a query never blocks a worker thread.
+
+use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::Row;
+
+/// Column list shared by every SELECT, so the row decoder stays in lock-step with the query.
+const COLS: &str =
+    "id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived";
+
+/// PostgreSQL-backed [`Store`]. Holds a pooled connection; the async trait methods drive sqlx
+/// natively, so no worker thread is ever blocked on a DB round-trip.
+pub struct PgStore {
+    pool: PgPool,
+}
+
+impl PgStore {
+    /// Open a pooled connection. Async; call from within a Tokio runtime.
+    pub async fn connect(database_url: &str) -> Result<Self, sqlx::Error> {
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(database_url)
+            .await?;
+        Ok(Self::from_pool(pool))
+    }
+
+    /// Construct from an existing pool (used by tests that share a pool).
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Idempotent, portable migration. Standard SQL only — safe to run on every startup. The
+    /// composite index backs the per-owner reading-list lookup (`owner_sub` filter +
+    /// `saved_at` ordering).
+    pub async fn migrate(&self) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS clips (\
+                 id TEXT PRIMARY KEY, \
+                 owner_sub TEXT NOT NULL, \
+                 url TEXT NOT NULL, \
+                 title TEXT NOT NULL, \
+                 excerpt TEXT NOT NULL, \
+                 content_text TEXT NOT NULL, \
+                 site TEXT NOT NULL, \
+                 saved_at BIGINT NOT NULL, \
+                 read BOOLEAN NOT NULL DEFAULT FALSE, \
+                 archived BOOLEAN NOT NULL DEFAULT FALSE\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_clips_owner_saved \
+             ON clips (owner_sub, saved_at)",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Backs the de-dup lookup (an owner's existing clip for a URL).
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_clips_owner_url \
+             ON clips (owner_sub, url)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    fn clip_from_row(row: &sqlx::postgres::PgRow) -> Result<Clip, sqlx::Error> {
+        Ok(Clip {
+            id: row.try_get("id")?,
+            owner_sub: row.try_get("owner_sub")?,
+            url: row.try_get("url")?,
+            title: row.try_get("title")?,
+            excerpt: row.try_get("excerpt")?,
+            content_text: row.try_get("content_text")?,
+            site: row.try_get("site")?,
+            saved_at: row.try_get("saved_at")?,
+            read: row.try_get("read")?,
+            archived: row.try_get("archived")?,
+        })
+    }
+
+    async fn create_async(&self, clip: &Clip) -> Result<bool, sqlx::Error> {
+        // ON CONFLICT DO NOTHING => 0 rows affected signals an id collision; the handler then
+        // retries with a fresh id. This is the single, race-free insert path.
+        let result = sqlx::query(
+            "INSERT INTO clips \
+                 (id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&clip.id)
+        .bind(&clip.owner_sub)
+        .bind(&clip.url)
+        .bind(&clip.title)
+        .bind(&clip.excerpt)
+        .bind(&clip.content_text)
+        .bind(&clip.site)
+        .bind(clip.saved_at)
+        .bind(clip.read)
+        .bind(clip.archived)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn get_async(&self, id: &str) -> Result<Option<Clip>, sqlx::Error> {
+        let row = sqlx::query(&format!("SELECT {COLS} FROM clips WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(Self::clip_from_row).transpose()
+    }
+
+    async fn find_by_owner_url_async(
+        &self,
+        owner_sub: &str,
+        url: &str,
+    ) -> Result<Option<Clip>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {COLS} FROM clips WHERE owner_sub = $1 AND url = $2 LIMIT 1"
+        ))
+        .bind(owner_sub)
+        .bind(url)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(Self::clip_from_row).transpose()
+    }
+
+    async fn list_async(&self, owner_sub: &str, filter: Filter) -> Result<Vec<Clip>, sqlx::Error> {
+        // Each view is a standard-SQL predicate over the boolean flags.
+        let predicate = match filter {
+            Filter::All => "archived = FALSE",
+            Filter::Unread => "archived = FALSE AND read = FALSE",
+            Filter::Archived => "archived = TRUE",
+        };
+        let rows = sqlx::query(&format!(
+            "SELECT {COLS} FROM clips \
+             WHERE owner_sub = $1 AND {predicate} \
+             ORDER BY saved_at DESC, id DESC LIMIT $2"
+        ))
+        .bind(owner_sub)
+        .bind(LIST_LIMIT as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::clip_from_row).collect()
+    }
+
+    async fn mark_read_async(&self, id: &str, owner_sub: &str) -> Result<bool, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE clips SET read = TRUE WHERE id = $1 AND owner_sub = $2")
+                .bind(id)
+                .bind(owner_sub)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_archived_async(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        archived: bool,
+    ) -> Result<bool, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE clips SET archived = $3 WHERE id = $1 AND owner_sub = $2")
+                .bind(id)
+                .bind(owner_sub)
+                .bind(archived)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_async(&self, id: &str, owner_sub: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM clips WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+#[async_trait]
+impl Store for PgStore {
+    async fn create(&self, clip: &Clip) -> Result<bool, StoreError> {
+        self.create_async(clip)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<Clip>, StoreError> {
+        self.get_async(id)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn find_by_owner_url(
+        &self,
+        owner_sub: &str,
+        url: &str,
+    ) -> Result<Option<Clip>, StoreError> {
+        self.find_by_owner_url_async(owner_sub, url)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list(&self, owner_sub: &str, filter: Filter) -> Result<Vec<Clip>, StoreError> {
+        self.list_async(owner_sub, filter)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn mark_read(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        self.mark_read_async(id, owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn set_archived(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        archived: bool,
+    ) -> Result<bool, StoreError> {
+        self.set_archived_async(id, owner_sub, archived)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn delete(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        self.delete_async(id, owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(id: &str, owner: &str, url: &str, saved_at: i64) -> Clip {
+        Clip {
+            id: id.into(),
+            owner_sub: owner.into(),
+            url: url.into(),
+            title: "t".into(),
+            excerpt: "e".into(),
+            content_text: "c".into(),
+            site: "s".into(),
+            saved_at,
+            read: false,
+            archived: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_is_collision_aware() {
+        let s = InMemoryStore::new();
+        assert!(s.create(&clip("a", "u", "https://x", 1)).await.unwrap());
+        assert!(!s.create(&clip("a", "u", "https://y", 2)).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_view_and_owner() {
+        let s = InMemoryStore::new();
+        s.create(&clip("a", "u", "https://a", 10)).await.unwrap();
+        s.create(&clip("b", "u", "https://b", 20)).await.unwrap();
+        s.mark_read("b", "u").await.unwrap();
+        s.create(&clip("c", "u", "https://c", 30)).await.unwrap();
+        s.set_archived("c", "u", true).await.unwrap();
+        s.create(&clip("d", "other", "https://d", 40)).await.unwrap();
+
+        let all = s.list("u", Filter::All).await.unwrap();
+        // newest-first, archived + other-owner excluded
+        assert_eq!(all.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+
+        let unread = s.list("u", Filter::Unread).await.unwrap();
+        assert_eq!(unread.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+
+        let archived = s.list("u", Filter::Archived).await.unwrap();
+        assert_eq!(archived.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["c"]);
+    }
+
+    #[tokio::test]
+    async fn find_by_owner_url_scopes_to_owner() {
+        let s = InMemoryStore::new();
+        s.create(&clip("a", "u", "https://x", 1)).await.unwrap();
+        assert!(s.find_by_owner_url("u", "https://x").await.unwrap().is_some());
+        assert!(s.find_by_owner_url("u", "https://y").await.unwrap().is_none());
+        assert!(s.find_by_owner_url("other", "https://x").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn mutations_are_ownership_scoped() {
+        let s = InMemoryStore::new();
+        s.create(&clip("a", "u", "https://x", 1)).await.unwrap();
+        assert!(!s.mark_read("a", "intruder").await.unwrap());
+        assert!(!s.set_archived("a", "intruder", true).await.unwrap());
+        assert!(!s.delete("a", "intruder").await.unwrap());
+        assert!(s.get("a").await.unwrap().is_some());
+        assert!(s.delete("a", "u").await.unwrap());
+        assert!(s.get("a").await.unwrap().is_none());
+    }
+}
