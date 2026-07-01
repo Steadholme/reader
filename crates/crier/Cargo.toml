@@ -39,6 +39,10 @@ time = { version = "0.3", default-features = false, features = ["std", "formatti
 # CSPRNG bytes for the double-submit CSRF token; `hex` encodes it (matches inkwell).
 getrandom = "0.2"
 hex = "0.4"
+# HMAC-SHA256 verification of the gateway-injected identity signature (X-Auth-Sig). Shared
+# primitive with the rest of the estate; the canonical message matches Sluice's Go signer.
+hmac = "0.12"
+sha2 = "0.10"
 # Best-effort outbound federation delivery (Accept on Follow, Create fan-out) + inbox discovery.
 # rustls (NO OpenSSL), JSON helpers. default-features off so no native-tls/openssl is dragged in —
 # the binary stays glibc-only, matching the estate posture. Federation degrades gracefully when a

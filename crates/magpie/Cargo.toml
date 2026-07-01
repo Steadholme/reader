@@ -36,6 +36,10 @@ tracing-subscriber = "0.3"
 time = { version = "0.3", default-features = false, features = ["std"] }
 # CSPRNG (OsRng) for the short random clip id + the double-submit CSRF token.
 rand = "0.8"
+# HMAC-SHA256 verification of the gateway-injected identity signature (X-Auth-Sig). Shared
+# primitive with the rest of the estate; the canonical message matches Sluice's Go signer.
+hmac = "0.12"
+sha2 = "0.10"
 # Portable PostgreSQL data layer. Runtime queries only (sqlx::query/Row) — NO compile-time
 # macros, so the build needs NO database. rustls TLS (ring) — no openssl. The same standard SQL
 # later runs unchanged on FusionDB over pgwire.
