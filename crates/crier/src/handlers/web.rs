@@ -26,6 +26,9 @@ const TIMELINE_HTML: &str = include_str!("../../templates/timeline.html");
 pub struct NoteForm {
     #[serde(default)]
     pub content: String,
+    /// Optional image URL (an Aperture share URL) to attach to the note. Empty => no attachment.
+    #[serde(default)]
+    pub attachment_url: String,
     #[serde(default)]
     pub csrf_token: String,
 }
@@ -38,6 +41,7 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
 
     let notes = state.store.list_notes().await;
     let follower_count = state.store.count_followers().await;
+    let profile = state.store.get_profile().await;
 
     let mut items = String::new();
     if notes.is_empty() {
@@ -52,15 +56,36 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
         }
     }
 
+    let header_html = if profile.header_url.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="profile__banner"><img src="{url}" alt="Profile header"></div>"#,
+            url = esc(&profile.header_url),
+        )
+    };
+    let avatar_html = if profile.avatar_url.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<img class="profile__avatar" src="{url}" alt="Profile avatar">"#,
+            url = esc(&profile.avatar_url),
+        )
+    };
+
     let page = TIMELINE_HTML
         .replace("{{CSS}}", APP_CSS)
         .replace("{{TOPBAR}}", &topbar("Crier", &email))
+        .replace("{{HEADER}}", &header_html)
+        .replace("{{AVATAR}}", &avatar_html)
         .replace("{{HANDLE}}", &esc(&state.config.handle()))
         .replace("{{DISPLAY_NAME}}", &esc(&state.config.display_name))
         .replace("{{SUMMARY}}", &esc(&state.config.summary))
         .replace("{{FOLLOWERS}}", &follower_count.to_string())
         .replace("{{NOTE_COUNT}}", &notes.len().to_string())
         .replace("{{CSRF}}", &esc(&csrf))
+        .replace("{{AVATAR_URL}}", &esc(&profile.avatar_url))
+        .replace("{{HEADER_URL}}", &esc(&profile.header_url))
         .replace("{{ITEMS}}", &items);
 
     html_with_cookie(page, set_cookie)
@@ -76,6 +101,9 @@ pub async fn create_note(
     auth::verify_csrf(&headers, &form.csrf_token)?;
 
     let content = validate_content(&form.content)?;
+    // An attached image must be a plain http(s) URL — this blocks `javascript:`/`data:` payloads
+    // from ever reaching the timeline `<img src>` or the federated attachment.
+    let attachment_url = validate_optional_url(&form.attachment_url)?;
 
     let now = now_secs();
     let note = Note {
@@ -85,6 +113,7 @@ pub async fn create_note(
         visibility: "public".to_string(),
         created_at: now,
         updated_at: 0,
+        attachment_url,
     };
     state.store.create_note(&note).await?;
     tracing::info!(id = %note.id, "note created");
@@ -257,6 +286,51 @@ pub async fn follow_remote(
     Ok(redirect("/home"))
 }
 
+/// Profile-image form for `POST /api/profile`. Identity is NEVER taken from the form; both URLs are
+/// optional (an empty field clears that image).
+#[derive(Debug, Deserialize)]
+pub struct ProfileForm {
+    #[serde(default)]
+    pub avatar_url: String,
+    #[serde(default)]
+    pub header_url: String,
+    #[serde(default)]
+    pub csrf_token: String,
+}
+
+/// `POST /api/profile` — set the actor's avatar (icon) + header (image) image URLs, then bounce to
+/// `/`. SSO-gated + double-submit CSRF; each URL is validated http(s) before it is stored (so it can
+/// never inject markup into the timeline `<img src>` or the federated Actor JSON). Audited.
+pub async fn set_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ProfileForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+
+    let profile = crate::store::Profile {
+        avatar_url: validate_optional_url(&form.avatar_url)?,
+        header_url: validate_optional_url(&form.header_url)?,
+    };
+    state.store.set_profile(&profile).await?;
+    tracing::info!("actor profile images updated");
+
+    // Audit WHO changed the profile + which images are now set — never the URLs themselves.
+    state.audit.emit(AuditEvent::notice(
+        "crier.profile.update",
+        &sub,
+        &state.config.actor_url(),
+        &format!(
+            "avatar={} header={}",
+            !profile.avatar_url.is_empty(),
+            !profile.header_url.is_empty()
+        ),
+    ));
+
+    Ok(redirect("/"))
+}
+
 /// `GET /home` — the home timeline: notes delivered by the remote actors we follow, newest-first.
 pub async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let email = auth::display_email(&headers);
@@ -334,6 +408,29 @@ fn validate_content(raw: &str) -> Result<&str, AppError> {
     Ok(content)
 }
 
+/// Max characters accepted for an image URL (avatar / header / attachment).
+const MAX_URL_CHARS: usize = 2048;
+
+/// Validate an OPTIONAL image URL: an empty field is accepted (means "unset / no attachment"); a
+/// non-empty value MUST be a plain `http(s)` URL under the length cap. Rejecting anything else keeps
+/// `javascript:` / `data:` payloads out of the `<img src>` and the federated JSON. Returns the
+/// trimmed URL (or the empty string).
+fn validate_optional_url(raw: &str) -> Result<String, AppError> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Ok(String::new());
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(AppError::InvalidRequest(
+            "image URL must start with http:// or https://".to_string(),
+        ));
+    }
+    if url.chars().count() > MAX_URL_CHARS {
+        return Err(AppError::InvalidRequest("image URL is too long".to_string()));
+    }
+    Ok(url.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Render helpers
 // ---------------------------------------------------------------------------
@@ -347,15 +444,30 @@ fn render_note(note: &Note, csrf: &str, owned: bool) -> String {
     } else {
         String::new()
     };
+    let media = render_media(&note.attachment_url);
     format!(
         r#"<article class="note">
-  <div class="note__body">{body}</div>
+  <div class="note__body">{body}</div>{media}
   <div class="note__meta">{date}{edited}</div>{controls}
 </article>"#,
         body = render_note_html(&note.content),
+        media = media,
         date = esc(&fmt_date(note.created_at)),
         edited = edited,
         controls = controls,
+    )
+}
+
+/// Render an optional inline attachment image (escaped src). Empty URL => no markup. The URL was
+/// validated http(s) at write time; it is escaped again here as defense in depth.
+fn render_media(url: &str) -> String {
+    if url.is_empty() {
+        return String::new();
+    }
+    format!(
+        r#"
+  <div class="note__media"><img src="{url}" alt="Attached image" loading="lazy"></div>"#,
+        url = esc(url),
     )
 }
 

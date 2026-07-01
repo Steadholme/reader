@@ -31,7 +31,10 @@
                  placeholder="Search your clips…" aria-label="Search your clips">
           <button class="btn btn-secondary btn-sm" type="submit">Search</button>
         </form>
-        <div class="tabs">{{TABS}}</div>
+        <div class="tabs tabs--row">
+          <div class="tabs__group">{{TABS}}</div>
+          <a class="tab" href="/highlights">Highlights</a>
+        </div>
         <ul class="clip-list">
           {{LIST}}
         </ul>

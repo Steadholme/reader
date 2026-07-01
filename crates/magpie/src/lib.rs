@@ -11,10 +11,13 @@
 //! - `GET  /search?q=` — full-text search over title + extracted text (keyset-paginated)
 //! - `GET  /clip?u=` — bookmarklet landing: SSO confirm page that POSTs to `/clip`
 //! - `POST /clip` — fetch the URL, extract, save (with optional tags) -> 302 `/` (CSRF-checked)
-//! - `GET  /r/{id}` — clean reader view of the saved text; marks the clip read
+//! - `GET  /r/{id}` — clean reader view of the saved text; marks the clip read; shows highlights
+//! - `POST /r/{id}/highlight` — add a highlight (+ optional note) -> 302 `/r/{id}` (CSRF-checked)
 //! - `POST /archive/{id}` — toggle archived -> 302 back (CSRF-checked)
 //! - `POST /delete/{id}` — delete your own clip -> 302 back (CSRF-checked)
 //! - `POST /tags/{id}` — edit your own clip's tags -> 302 `/r/{id}` (CSRF-checked)
+//! - `GET  /highlights` — every highlight the owner has made (aggregate), grouped by clip
+//! - `POST /highlight/{hid}/delete` — delete one of your highlights -> 302 back (CSRF-checked)
 
 pub mod auth;
 pub mod config;
@@ -57,9 +60,15 @@ pub fn app(state: AppState) -> Router {
             get(handlers::clips::clip_form).post(handlers::clips::clip_create),
         )
         .route("/r/{id}", get(handlers::clips::reader))
+        .route("/r/{id}/highlight", post(handlers::clips::add_highlight))
         .route("/archive/{id}", post(handlers::clips::archive))
         .route("/delete/{id}", post(handlers::clips::delete))
         .route("/tags/{id}", post(handlers::clips::edit_tags))
+        .route("/highlights", get(handlers::clips::highlights))
+        .route(
+            "/highlight/{hid}/delete",
+            post(handlers::clips::delete_highlight),
+        )
         // Reject a forged gateway identity (spoofed X-Auth-* from a rogue in-network peer):
         // when GATEWAY_HMAC_KEY is set, an injected identity MUST carry a valid X-Auth-Sig.
         // No-op when the key is unset or no identity is present (health/dev).

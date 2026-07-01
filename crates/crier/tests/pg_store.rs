@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use crier::store::{Follower, Note, PgStore, Store};
+use crier::store::{Follower, Note, PgStore, Profile, Store};
 use crier::{app, build_dev_state, now_secs, AppState};
 use tower::ServiceExt;
 
@@ -44,6 +44,7 @@ async fn pg_store_full_integration() {
         visibility: "public".to_string(),
         created_at: now - 100,
         updated_at: 0,
+        attachment_url: "https://aperture.w33d.xyz/s/pg.png".to_string(),
     };
     pg.create_note(&note).await.expect("create note");
 
@@ -60,6 +61,7 @@ async fn pg_store_full_integration() {
         visibility: "public".to_string(),
         created_at: now,
         updated_at: 0,
+        attachment_url: String::new(),
     };
     pg.create_note(&note2).await.expect("create note 2");
 
@@ -68,6 +70,36 @@ async fn pg_store_full_integration() {
     assert_eq!(listed[0].id, "note_pg_2", "newest first");
     assert!(pg.count_notes().await >= 2);
     assert_eq!(pg.get_note("note_pg_1").await.unwrap().content, "from postgres");
+    // The nullable image attachment round-trips (set on note 1, NULL/"" on note 2).
+    assert_eq!(
+        pg.get_note("note_pg_1").await.unwrap().attachment_url,
+        "https://aperture.w33d.xyz/s/pg.png"
+    );
+    assert_eq!(pg.get_note("note_pg_2").await.unwrap().attachment_url, "");
+
+    // --- profile images: default empty, upsert, and clear --------------------
+    let p0 = pg.get_profile().await;
+    assert_eq!(p0.avatar_url, "", "profile avatar defaults empty");
+    assert_eq!(p0.header_url, "", "profile header defaults empty");
+    pg.set_profile(&Profile {
+        avatar_url: "https://aperture.w33d.xyz/s/a.png".to_string(),
+        header_url: "https://aperture.w33d.xyz/s/h.jpg".to_string(),
+    })
+    .await
+    .expect("set profile");
+    let p1 = pg.get_profile().await;
+    assert_eq!(p1.avatar_url, "https://aperture.w33d.xyz/s/a.png");
+    assert_eq!(p1.header_url, "https://aperture.w33d.xyz/s/h.jpg");
+    // Upsert clears the header (empty => NULL) while keeping the avatar.
+    pg.set_profile(&Profile {
+        avatar_url: "https://aperture.w33d.xyz/s/a2.png".to_string(),
+        header_url: String::new(),
+    })
+    .await
+    .expect("update profile");
+    let p2 = pg.get_profile().await;
+    assert_eq!(p2.avatar_url, "https://aperture.w33d.xyz/s/a2.png");
+    assert_eq!(p2.header_url, "", "cleared header reads back empty");
 
     // --- owner-scoped edit + delete ---------------------------------------
     // Wrong owner -> no-op (false), content untouched.

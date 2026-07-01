@@ -305,6 +305,36 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 .reader-body pre, .reader-body code { font-family: var(--mono); }
 .reader-empty { font-family: var(--font); color: var(--ink-3); }
 
+/* ---- Highlights ---------------------------------------------------------- */
+.tabs--row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tabs__group { display: flex; gap: 8px; }
+.reader-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 22px; align-items: start; }
+.reader-margin { position: sticky; top: 22px; display: flex; flex-direction: column; gap: 16px; }
+.highlight-form .field { display: block; margin: 0 0 12px; }
+.highlight-form .field-label { display: block; font-size: 13px; font-weight: 600; margin: 0 0 6px; color: var(--ink-2); }
+.highlight-quote, .highlight-note {
+  width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 14px;
+  color: var(--ink); background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 12px;
+}
+.highlight-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.highlight-item {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--sh-xs); padding: 14px 16px;
+}
+.highlight-item--empty { color: var(--ink-3); font-size: 14px; }
+.highlight-quote-text {
+  margin: 0 0 8px; padding: 2px 0 2px 14px; border-left: 3px solid var(--accent-2);
+  color: var(--ink); font-family: var(--serif); font-size: 15px; line-height: 1.55; word-break: break-word;
+}
+.highlight-note-text { margin: 0 0 8px; color: var(--ink-2); font-size: 14px; line-height: 1.5; word-break: break-word; }
+.highlight-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.highlight-time { color: var(--ink-3); font-size: 12px; }
+.highlight-group { margin: 0 0 28px; }
+.highlight-group__title { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
+.highlight-group__title a { color: var(--ink); text-decoration: none; }
+.highlight-group__title a:hover { color: var(--accent); }
+
 /* ---- Error / message page ------------------------------------------------ */
 .status-code { font-size: 44px; font-weight: 600; letter-spacing: -.02em; color: var(--accent); font-family: var(--mono); }
 .message-heading { margin: 8px 0; font-size: 22px; font-weight: 600; }
@@ -316,4 +346,6 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
   .clip-actions { flex-direction: row; flex-wrap: wrap; }
   .clip-actions .btn, .clip-actions .inline-form .btn { width: auto; }
   .reader { padding: 28px 22px; }
+  .reader-layout { grid-template-columns: 1fr; }
+  .reader-margin { position: static; }
 }

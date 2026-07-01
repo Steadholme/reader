@@ -35,6 +35,31 @@ pub struct Clip {
     pub tags: Option<String>,
 }
 
+/// A single owner-made highlight on a saved clip: a verbatim quote from the article plus an
+/// optional inline note.
+///
+/// Field order/types mirror the `highlights` table exactly. `quote` is copied from the (untrusted,
+/// remote) article text and `note` is owner-typed; BOTH are stored as PLAIN TEXT and HTML-escaped
+/// on every render (never emitted as raw HTML). A highlight is private to its `owner_sub` and is
+/// keyed to a `clip_id`; the pair `(owner_sub, clip_id, quote)` is de-duplicated so re-highlighting
+/// the same passage just updates the note (idempotent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Highlight {
+    /// Short, random, URL-safe id (primary key; the target of the delete form).
+    pub id: String,
+    /// The clip this highlight belongs to (`clips.id`).
+    pub clip_id: String,
+    /// Owner subject from `X-Auth-Subject` (ownership key for list/delete).
+    pub owner_sub: String,
+    /// The highlighted passage, verbatim from the article — plain text, escaped on render.
+    pub quote: String,
+    /// Optional owner-typed inline note. `None` when the owner left it blank — the column is a
+    /// NULLABLE TEXT (never an array/JSON).
+    pub note: Option<String>,
+    /// Creation time, epoch seconds.
+    pub created_at: i64,
+}
+
 /// Reading-list filter. `All` and `Unread` show only NON-archived clips; `Archived` shows the
 /// archive. Keeping this as a closed enum means both stores agree on what each view contains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

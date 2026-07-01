@@ -30,6 +30,9 @@ pub struct Note {
     pub created_at: i64,
     /// Epoch seconds of the last owner edit, or `0` when the note has never been edited.
     pub updated_at: i64,
+    /// URL of a single attached image (an Aperture share URL), or `""` when the note has none.
+    /// Surfaced as an ActivityPub `attachment` Document and rendered inline on the timeline.
+    pub attachment_url: String,
 }
 
 /// A remote actor that follows us (maps 1:1 to a `followers` row).
@@ -107,6 +110,17 @@ pub struct HomeNote {
     pub received_at: i64,
 }
 
+/// The single actor's public profile images (maps 1:1 to the one `profile` row). Both are optional
+/// URLs (Aperture share URLs): `avatar_url` becomes the actor `icon`, `header_url` the actor
+/// `image`. Empty strings mean "unset" — the corresponding field is omitted from the Actor JSON.
+#[derive(Clone, Debug, Default)]
+pub struct Profile {
+    /// Avatar / icon image URL, or `""` when unset.
+    pub avatar_url: String,
+    /// Header / banner image URL, or `""` when unset.
+    pub header_url: String,
+}
+
 /// Storage failure surfaced to the handler layer.
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -166,6 +180,13 @@ pub trait Store: Send + Sync {
     /// match on the actor's host. Gates the inbox — a blocked sender is rejected and cannot follow.
     async fn is_blocked(&self, actor: &str) -> bool;
 
+    /// The single actor's profile images (avatar + header). Returns an all-empty [`Profile`] before
+    /// any have ever been set — a missing row is never an error.
+    async fn get_profile(&self) -> Profile;
+    /// Set (upsert) the single actor's profile images. Idempotent on the single row; an empty URL
+    /// clears that image.
+    async fn set_profile(&self, profile: &Profile) -> Result<(), StoreError>;
+
     /// The persisted actor keypair, or `None` before it has ever been generated.
     async fn get_actor_key(&self) -> Option<ActorKey>;
     /// Persist (once) the actor keypair. Idempotent: a second write with a key already present is a
@@ -194,6 +215,7 @@ pub struct InMemoryStore {
     notes: Mutex<Vec<Note>>,
     followers: Mutex<Vec<Follower>>,
     blocks: Mutex<Vec<Blocked>>,
+    profile: Mutex<Profile>,
     actor_key: Mutex<Option<ActorKey>>,
     following: Mutex<Vec<Following>>,
     home_notes: Mutex<Vec<HomeNote>>,
@@ -347,6 +369,15 @@ impl Store for InMemoryStore {
             })
     }
 
+    async fn get_profile(&self) -> Profile {
+        self.profile.lock().expect("profile lock poisoned").clone()
+    }
+
+    async fn set_profile(&self, profile: &Profile) -> Result<(), StoreError> {
+        *self.profile.lock().expect("profile lock poisoned") = profile.clone();
+        Ok(())
+    }
+
     async fn get_actor_key(&self) -> Option<ActorKey> {
         self.actor_key.lock().expect("actor_key lock poisoned").clone()
     }
@@ -456,6 +487,11 @@ impl PgStore {
         sqlx::query("ALTER TABLE notes ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT 0")
             .execute(&self.pool)
             .await?;
+        // Nullable image-attachment column (a note has zero or one attached image). Added via an
+        // idempotent ALTER so pre-existing deployments backfill it without a rewrite; NULL == none.
+        sqlx::query("ALTER TABLE notes ADD COLUMN IF NOT EXISTS attachment_url TEXT")
+            .execute(&self.pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_notes_created_at ON notes (created_at)")
             .execute(&self.pool)
             .await?;
@@ -489,6 +525,24 @@ impl PgStore {
         )
         .execute(&self.pool)
         .await?;
+        // The single actor's public profile images (id is always 'actor' — one row, upserted).
+        // Both columns are NULLABLE (an unset image is absent from the Actor JSON).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS profile (\
+                 id TEXT PRIMARY KEY, \
+                 avatar_url TEXT, \
+                 header_url TEXT\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Idempotent ALTERs so a pre-existing `profile` table gains any missing image column.
+        sqlx::query("ALTER TABLE profile ADD COLUMN IF NOT EXISTS avatar_url TEXT")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE profile ADD COLUMN IF NOT EXISTS header_url TEXT")
+            .execute(&self.pool)
+            .await?;
         // Remote actors WE follow (mirror of `followers`).
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS following (\
@@ -526,6 +580,8 @@ impl PgStore {
             visibility: row.try_get("visibility")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
+            // Nullable column: a NULL attachment reads back as the empty "no attachment" string.
+            attachment_url: row.try_get::<Option<String>, _>("attachment_url")?.unwrap_or_default(),
         })
     }
 
@@ -539,7 +595,7 @@ impl PgStore {
 
     async fn list_notes_async(&self) -> Result<Vec<Note>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, author_sub, content, visibility, created_at, updated_at \
+            "SELECT id, author_sub, content, visibility, created_at, updated_at, attachment_url \
              FROM notes WHERE visibility = 'public' \
              ORDER BY created_at DESC, id DESC LIMIT $1",
         )
@@ -551,7 +607,7 @@ impl PgStore {
 
     async fn get_note_async(&self, id: &str) -> Result<Option<Note>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, author_sub, content, visibility, created_at, updated_at \
+            "SELECT id, author_sub, content, visibility, created_at, updated_at, attachment_url \
              FROM notes WHERE id = $1",
         )
         .bind(id)
@@ -571,9 +627,15 @@ impl PgStore {
     }
 
     async fn create_note_async(&self, n: &Note) -> Result<(), sqlx::Error> {
+        // The nullable `attachment_url` stores NULL when there is no attachment (empty string).
+        let attachment: Option<&str> = if n.attachment_url.is_empty() {
+            None
+        } else {
+            Some(n.attachment_url.as_str())
+        };
         sqlx::query(
-            "INSERT INTO notes (id, author_sub, content, visibility, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO notes (id, author_sub, content, visibility, created_at, updated_at, attachment_url) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(&n.id)
         .bind(&n.author_sub)
@@ -581,6 +643,7 @@ impl PgStore {
         .bind(&n.visibility)
         .bind(n.created_at)
         .bind(n.updated_at)
+        .bind(attachment)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -745,6 +808,35 @@ impl PgStore {
         .bind(&key.private_pem)
         .bind(&key.public_pem)
         .bind(key.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_profile_async(&self) -> Result<Profile, sqlx::Error> {
+        let row = sqlx::query("SELECT avatar_url, header_url FROM profile WHERE id = 'actor'")
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(r) => Ok(Profile {
+                avatar_url: r.try_get::<Option<String>, _>("avatar_url")?.unwrap_or_default(),
+                header_url: r.try_get::<Option<String>, _>("header_url")?.unwrap_or_default(),
+            }),
+            None => Ok(Profile::default()),
+        }
+    }
+
+    async fn set_profile_async(&self, p: &Profile) -> Result<(), sqlx::Error> {
+        // An empty URL is stored as NULL (unset); the single 'actor' row is upserted in place.
+        let avatar: Option<&str> = (!p.avatar_url.is_empty()).then_some(p.avatar_url.as_str());
+        let header: Option<&str> = (!p.header_url.is_empty()).then_some(p.header_url.as_str());
+        sqlx::query(
+            "INSERT INTO profile (id, avatar_url, header_url) VALUES ('actor', $1, $2) \
+             ON CONFLICT (id) DO UPDATE SET avatar_url = EXCLUDED.avatar_url, \
+                 header_url = EXCLUDED.header_url",
+        )
+        .bind(avatar)
+        .bind(header)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -942,6 +1034,19 @@ impl Store for PgStore {
             tracing::error!(error = %e, "pg is_blocked failed");
             false
         })
+    }
+
+    async fn get_profile(&self) -> Profile {
+        self.get_profile_async().await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg get_profile failed");
+            Profile::default()
+        })
+    }
+
+    async fn set_profile(&self, profile: &Profile) -> Result<(), StoreError> {
+        self.set_profile_async(profile)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
     async fn get_actor_key(&self) -> Option<ActorKey> {

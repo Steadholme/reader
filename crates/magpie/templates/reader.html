@@ -22,21 +22,25 @@
     <div class="console__head console__head--row">
       <a class="btn btn-ghost btn-sm" href="/">&larr; Reading list</a>
       <div class="reader-actions">
+        <a class="btn btn-ghost btn-sm" href="/highlights">My highlights</a>
         <a class="btn btn-ghost btn-sm" href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">Open original</a>
         {{ARCHIVE}}
         {{DELETE}}
       </div>
     </div>
 
-    <article class="reader">
-      <h1 class="reader-title">{{TITLE}}</h1>
-      <p class="reader-meta">{{META}}</p>
-      <p class="reader-source"><a href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">{{URL_TEXT}}</a></p>
-      {{TAGS}}
-      <div class="reader-body">
-        {{CONTENT}}
-      </div>
-    </article>
+    <div class="reader-layout">
+      <article class="reader">
+        <h1 class="reader-title">{{TITLE}}</h1>
+        <p class="reader-meta">{{META}}</p>
+        <p class="reader-source"><a href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">{{URL_TEXT}}</a></p>
+        {{TAGS}}
+        <div class="reader-body">
+          {{CONTENT}}
+        </div>
+      </article>
+      {{HIGHLIGHTS}}
+    </div>
   </main>
 </body>
 </html>

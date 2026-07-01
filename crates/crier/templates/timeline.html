@@ -11,6 +11,8 @@
 {{TOPBAR}}
 <main class="reader">
   <div class="profile">
+    {{HEADER}}
+    {{AVATAR}}
     <h1 class="profile__name">{{DISPLAY_NAME}}</h1>
     <div class="profile__handle">@{{HANDLE}}</div>
     <p class="profile__summary">{{SUMMARY}}</p>
@@ -27,6 +29,10 @@
         <div class="field">
           <label for="content">New post</label>
           <textarea id="content" name="content" class="composer__body" maxlength="5000" placeholder="What's happening?" required></textarea>
+        </div>
+        <div class="field">
+          <label for="attachment_url">Attach an image (Aperture share URL, optional)</label>
+          <input id="attachment_url" name="attachment_url" class="composer__url" type="url" placeholder="https://aperture.w33d.xyz/s/…">
         </div>
         <div class="composer__actions">
           <button class="btn btn-primary" type="submit">Publish</button>
@@ -48,6 +54,28 @@
           <button class="btn btn-primary" type="submit">Follow</button>
         </div>
       </form>
+    </div>
+  </section>
+
+  <section class="card composer">
+    <div class="card__body">
+      <details class="profile__edit">
+        <summary class="btn btn-ghost btn-sm">Edit profile images</summary>
+        <form method="post" action="/api/profile">
+          <input type="hidden" name="csrf_token" value="{{CSRF}}">
+          <div class="field">
+            <label for="avatar_url">Avatar image URL (icon)</label>
+            <input id="avatar_url" name="avatar_url" class="composer__url" type="url" placeholder="https://aperture.w33d.xyz/s/…" value="{{AVATAR_URL}}">
+          </div>
+          <div class="field">
+            <label for="header_url">Header image URL (banner)</label>
+            <input id="header_url" name="header_url" class="composer__url" type="url" placeholder="https://aperture.w33d.xyz/s/…" value="{{HEADER_URL}}">
+          </div>
+          <div class="composer__actions">
+            <button class="btn btn-primary" type="submit">Save profile</button>
+          </div>
+        </form>
+      </details>
     </div>
   </section>
 

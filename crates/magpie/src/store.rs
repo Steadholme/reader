@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::config::LIST_LIMIT;
-use crate::model::{tags_contain, Clip, Cursor, Filter};
+use crate::model::{tags_contain, Clip, Cursor, Filter, Highlight};
 
 /// Storage failure surfaced to the handler layer (mapped to a 500 `server_error`).
 #[derive(Debug, Error)]
@@ -80,6 +80,47 @@ pub trait Store: Send + Sync {
 
     /// Delete an owner's clip. Returns `true` when a row was removed (existed AND owned).
     async fn delete(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
+
+    // ---- highlights ------------------------------------------------------------------
+
+    /// Insert a highlight. Returns `Ok(true)` when inserted, `Ok(false)` when the id already
+    /// existed (the caller retries with a new id). Idempotent at the id level.
+    async fn add_highlight(&self, highlight: &Highlight) -> Result<bool, StoreError>;
+
+    /// Fetch a highlight by id (ownership is enforced by the caller against `owner_sub`).
+    async fn get_highlight(&self, id: &str) -> Result<Option<Highlight>, StoreError>;
+
+    /// Find an owner's existing highlight of an exact `quote` on `clip_id` (the de-dup lookup that
+    /// makes re-highlighting the same passage idempotent — it updates the note instead of adding a
+    /// duplicate).
+    async fn find_highlight_by_quote(
+        &self,
+        owner_sub: &str,
+        clip_id: &str,
+        quote: &str,
+    ) -> Result<Option<Highlight>, StoreError>;
+
+    /// Replace the note on an owner's highlight (`None` clears it). Returns `true` when a row
+    /// changed (existed AND owned).
+    async fn set_highlight_note(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        note: Option<String>,
+    ) -> Result<bool, StoreError>;
+
+    /// An owner's highlights on one clip, oldest-first (reading order), capped at [`LIST_LIMIT`].
+    async fn list_highlights(
+        &self,
+        owner_sub: &str,
+        clip_id: &str,
+    ) -> Result<Vec<Highlight>, StoreError>;
+
+    /// All of an owner's highlights across every clip, newest-first, capped at [`LIST_LIMIT`].
+    async fn list_all_highlights(&self, owner_sub: &str) -> Result<Vec<Highlight>, StoreError>;
+
+    /// Delete an owner's highlight. Returns `true` when a row was removed (existed AND owned).
+    async fn delete_highlight(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
 }
 
 // --------------------------------------------------------------------------------------
@@ -91,6 +132,7 @@ pub trait Store: Send + Sync {
 #[derive(Default)]
 pub struct InMemoryStore {
     clips: Mutex<Vec<Clip>>,
+    highlights: Mutex<Vec<Highlight>>,
 }
 
 impl InMemoryStore {
@@ -244,6 +286,90 @@ impl Store for InMemoryStore {
         clips.retain(|c| !(c.id == id && c.owner_sub == owner_sub));
         Ok(clips.len() != before)
     }
+
+    async fn add_highlight(&self, highlight: &Highlight) -> Result<bool, StoreError> {
+        let mut hs = self.highlights.lock().expect("highlights lock poisoned");
+        if hs.iter().any(|h| h.id == highlight.id) {
+            return Ok(false);
+        }
+        hs.push(highlight.clone());
+        Ok(true)
+    }
+
+    async fn get_highlight(&self, id: &str) -> Result<Option<Highlight>, StoreError> {
+        let hs = self.highlights.lock().expect("highlights lock poisoned");
+        Ok(hs.iter().find(|h| h.id == id).cloned())
+    }
+
+    async fn find_highlight_by_quote(
+        &self,
+        owner_sub: &str,
+        clip_id: &str,
+        quote: &str,
+    ) -> Result<Option<Highlight>, StoreError> {
+        let hs = self.highlights.lock().expect("highlights lock poisoned");
+        Ok(hs
+            .iter()
+            .find(|h| h.owner_sub == owner_sub && h.clip_id == clip_id && h.quote == quote)
+            .cloned())
+    }
+
+    async fn set_highlight_note(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        note: Option<String>,
+    ) -> Result<bool, StoreError> {
+        let mut hs = self.highlights.lock().expect("highlights lock poisoned");
+        match hs.iter_mut().find(|h| h.id == id && h.owner_sub == owner_sub) {
+            Some(h) => {
+                h.note = note;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn list_highlights(
+        &self,
+        owner_sub: &str,
+        clip_id: &str,
+    ) -> Result<Vec<Highlight>, StoreError> {
+        let hs = self.highlights.lock().expect("highlights lock poisoned");
+        let mut out: Vec<Highlight> = hs
+            .iter()
+            .filter(|h| h.owner_sub == owner_sub && h.clip_id == clip_id)
+            .cloned()
+            .collect();
+        // Oldest-first (reading order); id as a deterministic tiebreak within the same second.
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        out.truncate(LIST_LIMIT);
+        Ok(out)
+    }
+
+    async fn list_all_highlights(&self, owner_sub: &str) -> Result<Vec<Highlight>, StoreError> {
+        let hs = self.highlights.lock().expect("highlights lock poisoned");
+        let mut out: Vec<Highlight> = hs
+            .iter()
+            .filter(|h| h.owner_sub == owner_sub)
+            .cloned()
+            .collect();
+        // Newest-first, matching the reading-list ordering.
+        out.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        out.truncate(LIST_LIMIT);
+        Ok(out)
+    }
+
+    async fn delete_highlight(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        let mut hs = self.highlights.lock().expect("highlights lock poisoned");
+        let before = hs.len();
+        hs.retain(|h| !(h.id == id && h.owner_sub == owner_sub));
+        Ok(hs.len() != before)
+    }
 }
 
 // --------------------------------------------------------------------------------------
@@ -260,6 +386,9 @@ use sqlx::Row;
 /// Column list shared by every SELECT, so the row decoder stays in lock-step with the query.
 const COLS: &str =
     "id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived, tags";
+
+/// Column list shared by every highlight SELECT, so the row decoder stays in lock-step.
+const HL_COLS: &str = "id, clip_id, owner_sub, quote, note, created_at";
 
 /// Escape the LIKE metacharacters (`\`, `%`, `_`) in a user-supplied needle so it matches
 /// literally under `LIKE ... ESCAPE '\'`. Backslash first, so the escapes we add are not re-escaped.
@@ -326,7 +455,152 @@ impl PgStore {
         )
         .execute(&self.pool)
         .await?;
+        // Highlights: owner-made annotations on a clip. Portable standard SQL (TEXT/BIGINT,
+        // nullable note) — safe to re-run on every boot.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS highlights (\
+                 id TEXT PRIMARY KEY, \
+                 clip_id TEXT NOT NULL, \
+                 owner_sub TEXT NOT NULL, \
+                 quote TEXT NOT NULL, \
+                 note TEXT, \
+                 created_at BIGINT NOT NULL\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Backs the per-clip margin list (owner + clip filter, created_at ordering).
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_highlights_owner_clip \
+             ON highlights (owner_sub, clip_id, created_at)",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Backs the "my highlights" aggregate (owner filter, created_at ordering).
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_highlights_owner_created \
+             ON highlights (owner_sub, created_at)",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    fn highlight_from_row(row: &sqlx::postgres::PgRow) -> Result<Highlight, sqlx::Error> {
+        Ok(Highlight {
+            id: row.try_get("id")?,
+            clip_id: row.try_get("clip_id")?,
+            owner_sub: row.try_get("owner_sub")?,
+            quote: row.try_get("quote")?,
+            note: row.try_get("note")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+
+    async fn add_highlight_async(&self, h: &Highlight) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "INSERT INTO highlights (id, clip_id, owner_sub, quote, note, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&h.id)
+        .bind(&h.clip_id)
+        .bind(&h.owner_sub)
+        .bind(&h.quote)
+        .bind(&h.note)
+        .bind(h.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn get_highlight_async(&self, id: &str) -> Result<Option<Highlight>, sqlx::Error> {
+        let row = sqlx::query(&format!("SELECT {HL_COLS} FROM highlights WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(Self::highlight_from_row).transpose()
+    }
+
+    async fn find_highlight_by_quote_async(
+        &self,
+        owner_sub: &str,
+        clip_id: &str,
+        quote: &str,
+    ) -> Result<Option<Highlight>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {HL_COLS} FROM highlights \
+             WHERE owner_sub = $1 AND clip_id = $2 AND quote = $3 LIMIT 1"
+        ))
+        .bind(owner_sub)
+        .bind(clip_id)
+        .bind(quote)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(Self::highlight_from_row).transpose()
+    }
+
+    async fn set_highlight_note_async(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        note: Option<String>,
+    ) -> Result<bool, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE highlights SET note = $3 WHERE id = $1 AND owner_sub = $2")
+                .bind(id)
+                .bind(owner_sub)
+                .bind(&note)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_highlights_async(
+        &self,
+        owner_sub: &str,
+        clip_id: &str,
+    ) -> Result<Vec<Highlight>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {HL_COLS} FROM highlights \
+             WHERE owner_sub = $1 AND clip_id = $2 \
+             ORDER BY created_at ASC, id ASC LIMIT $3"
+        ))
+        .bind(owner_sub)
+        .bind(clip_id)
+        .bind(LIST_LIMIT as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::highlight_from_row).collect()
+    }
+
+    async fn list_all_highlights_async(
+        &self,
+        owner_sub: &str,
+    ) -> Result<Vec<Highlight>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {HL_COLS} FROM highlights \
+             WHERE owner_sub = $1 \
+             ORDER BY created_at DESC, id DESC LIMIT $2"
+        ))
+        .bind(owner_sub)
+        .bind(LIST_LIMIT as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::highlight_from_row).collect()
+    }
+
+    async fn delete_highlight_async(
+        &self,
+        id: &str,
+        owner_sub: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM highlights WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     fn clip_from_row(row: &sqlx::postgres::PgRow) -> Result<Clip, sqlx::Error> {
@@ -602,6 +876,62 @@ impl Store for PgStore {
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
+
+    async fn add_highlight(&self, highlight: &Highlight) -> Result<bool, StoreError> {
+        self.add_highlight_async(highlight)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn get_highlight(&self, id: &str) -> Result<Option<Highlight>, StoreError> {
+        self.get_highlight_async(id)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn find_highlight_by_quote(
+        &self,
+        owner_sub: &str,
+        clip_id: &str,
+        quote: &str,
+    ) -> Result<Option<Highlight>, StoreError> {
+        self.find_highlight_by_quote_async(owner_sub, clip_id, quote)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn set_highlight_note(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        note: Option<String>,
+    ) -> Result<bool, StoreError> {
+        self.set_highlight_note_async(id, owner_sub, note)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_highlights(
+        &self,
+        owner_sub: &str,
+        clip_id: &str,
+    ) -> Result<Vec<Highlight>, StoreError> {
+        self.list_highlights_async(owner_sub, clip_id)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_all_highlights(&self, owner_sub: &str) -> Result<Vec<Highlight>, StoreError> {
+        self.list_all_highlights_async(owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn delete_highlight(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        self.delete_highlight_async(id, owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -723,6 +1053,62 @@ mod tests {
         assert_eq!(s.get("a").await.unwrap().unwrap().tags.as_deref(), Some("rust,web"));
         assert!(s.set_tags("a", "u", None).await.unwrap());
         assert!(s.get("a").await.unwrap().unwrap().tags.is_none());
+    }
+
+    fn highlight(id: &str, clip_id: &str, owner: &str, quote: &str, at: i64) -> Highlight {
+        Highlight {
+            id: id.into(),
+            clip_id: clip_id.into(),
+            owner_sub: owner.into(),
+            quote: quote.into(),
+            note: None,
+            created_at: at,
+        }
+    }
+
+    #[tokio::test]
+    async fn highlights_list_per_clip_and_owner_scoped() {
+        let s = InMemoryStore::new();
+        s.add_highlight(&highlight("h1", "c1", "u", "alpha", 10)).await.unwrap();
+        s.add_highlight(&highlight("h2", "c1", "u", "beta", 20)).await.unwrap();
+        s.add_highlight(&highlight("h3", "c2", "u", "gamma", 30)).await.unwrap();
+        s.add_highlight(&highlight("h4", "c1", "other", "delta", 40)).await.unwrap();
+
+        // Per-clip margin: oldest-first, owner-scoped, other clips/owners excluded.
+        let c1 = s.list_highlights("u", "c1").await.unwrap();
+        assert_eq!(c1.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["h1", "h2"]);
+
+        // Aggregate: all owner's highlights newest-first.
+        let all = s.list_all_highlights("u").await.unwrap();
+        assert_eq!(all.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["h3", "h2", "h1"]);
+        // Owner scoping: the other owner sees only their own.
+        let other = s.list_all_highlights("other").await.unwrap();
+        assert_eq!(other.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["h4"]);
+    }
+
+    #[tokio::test]
+    async fn highlight_dedup_and_note_edit_are_ownership_scoped() {
+        let s = InMemoryStore::new();
+        // id-level idempotency: the same id is not inserted twice.
+        assert!(s.add_highlight(&highlight("h1", "c1", "u", "alpha", 10)).await.unwrap());
+        assert!(!s.add_highlight(&highlight("h1", "c1", "u", "beta", 20)).await.unwrap());
+
+        // De-dup lookup for the same (owner, clip, quote).
+        assert!(s.find_highlight_by_quote("u", "c1", "alpha").await.unwrap().is_some());
+        assert!(s.find_highlight_by_quote("u", "c1", "nope").await.unwrap().is_none());
+        assert!(s.find_highlight_by_quote("other", "c1", "alpha").await.unwrap().is_none());
+
+        // Note edit is owner-scoped.
+        assert!(!s.set_highlight_note("h1", "intruder", Some("x".into())).await.unwrap());
+        assert!(s.set_highlight_note("h1", "u", Some("my note".into())).await.unwrap());
+        assert_eq!(s.get_highlight("h1").await.unwrap().unwrap().note.as_deref(), Some("my note"));
+        assert!(s.set_highlight_note("h1", "u", None).await.unwrap());
+        assert!(s.get_highlight("h1").await.unwrap().unwrap().note.is_none());
+
+        // Delete is owner-scoped.
+        assert!(!s.delete_highlight("h1", "intruder").await.unwrap());
+        assert!(s.delete_highlight("h1", "u").await.unwrap());
+        assert!(s.get_highlight("h1").await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@
 use serde_json::{json, Value};
 
 use crate::config::Config;
-use crate::store::{Follower, Note};
+use crate::store::{Follower, Note, Profile};
 
 /// The ActivityStreams "public" magic collection every public post is addressed to.
 pub const PUBLIC: &str = "https://www.w3.org/ns/activitystreams#Public";
@@ -32,6 +32,24 @@ pub fn content_to_html(content: &str) -> String {
         .replace('\'', "&#x27;")
         .replace('\n', "<br>");
     format!("<p>{escaped}</p>")
+}
+
+/// Best-effort image `mediaType` guessed from a URL's file extension, defaulting to `image/jpeg`
+/// when there is no recognizable extension (Aperture share URLs often omit one). Only used to label
+/// an `Image` / `Document` object — remotes fetch the URL regardless.
+pub fn guess_media_type(url: &str) -> &'static str {
+    // Look only at the path's trailing extension, ignoring any query/fragment.
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => "image/jpeg",
+    }
 }
 
 /// The WebFinger JRD for `acct:<actor>@<domain>` — links the handle to the actor document.
@@ -57,8 +75,8 @@ pub fn webfinger(cfg: &Config) -> Value {
 /// The ActivityPub Actor (Person) document, publishing the actor's `publicKey` / `publicKeyPem` so
 /// remotes can verify our signed deliveries and we can be followed. The `@context` gains the
 /// security vocabulary that defines `publicKey` (what Mastodon and friends expect).
-pub fn actor(cfg: &Config, public_pem: &str) -> Value {
-    json!({
+pub fn actor(cfg: &Config, public_pem: &str, profile: &Profile) -> Value {
+    let mut a = json!({
         "@context": [
             "https://www.w3.org/ns/activitystreams",
             "https://w3id.org/security/v1"
@@ -82,7 +100,24 @@ pub fn actor(cfg: &Config, public_pem: &str) -> Value {
         "endpoints": {
             "sharedInbox": cfg.shared_inbox_url()
         }
-    })
+    });
+    // The avatar becomes the actor `icon`, the header the actor `image` — the properties Mastodon
+    // and friends render as the profile picture + banner. Each is omitted when unset.
+    if !profile.avatar_url.is_empty() {
+        a["icon"] = json!({
+            "type": "Image",
+            "mediaType": guess_media_type(&profile.avatar_url),
+            "url": profile.avatar_url,
+        });
+    }
+    if !profile.header_url.is_empty() {
+        a["image"] = json!({
+            "type": "Image",
+            "mediaType": guess_media_type(&profile.header_url),
+            "url": profile.header_url,
+        });
+    }
+    a
 }
 
 /// The ActivityStreams Note object for one stored note (dereferenceable at [`Config::note_url`]).
@@ -102,6 +137,15 @@ pub fn note_object(cfg: &Config, note: &Note) -> Value {
     // already has the note knows this is a revision.
     if note.updated_at > 0 {
         obj["updated"] = json!(crate::rfc3339(note.updated_at));
+    }
+    // A single attached image rides as an AS2 `attachment` Document (mediaType + url), the shape
+    // Mastodon renders as inline media.
+    if !note.attachment_url.is_empty() {
+        obj["attachment"] = json!([{
+            "type": "Document",
+            "mediaType": guess_media_type(&note.attachment_url),
+            "url": note.attachment_url,
+        }]);
     }
     obj
 }
@@ -233,7 +277,11 @@ mod tests {
 
     #[test]
     fn actor_has_required_fields_and_public_key() {
-        let a = actor(&cfg(), "-----BEGIN PUBLIC KEY-----\nMII...\n-----END PUBLIC KEY-----\n");
+        let a = actor(
+            &cfg(),
+            "-----BEGIN PUBLIC KEY-----\nMII...\n-----END PUBLIC KEY-----\n",
+            &Profile::default(),
+        );
         assert_eq!(a["type"], "Person");
         assert_eq!(a["id"], "https://social.w33d.xyz/users/w33d");
         assert_eq!(a["preferredUsername"], "w33d");
@@ -244,6 +292,59 @@ mod tests {
         assert_eq!(a["publicKey"]["id"], "https://social.w33d.xyz/users/w33d#main-key");
         assert_eq!(a["publicKey"]["owner"], "https://social.w33d.xyz/users/w33d");
         assert!(a["publicKey"]["publicKeyPem"].as_str().unwrap().contains("BEGIN PUBLIC KEY"));
+        // No profile images set -> the icon/image properties are absent.
+        assert!(a.get("icon").is_none());
+        assert!(a.get("image").is_none());
+    }
+
+    #[test]
+    fn actor_surfaces_profile_avatar_and_header() {
+        let profile = Profile {
+            avatar_url: "https://aperture.w33d.xyz/s/avatar.png".to_string(),
+            header_url: "https://aperture.w33d.xyz/s/banner.jpg".to_string(),
+        };
+        let a = actor(&cfg(), "-----BEGIN PUBLIC KEY-----\n-----END PUBLIC KEY-----\n", &profile);
+        assert_eq!(a["icon"]["type"], "Image");
+        assert_eq!(a["icon"]["mediaType"], "image/png");
+        assert_eq!(a["icon"]["url"], "https://aperture.w33d.xyz/s/avatar.png");
+        assert_eq!(a["image"]["type"], "Image");
+        assert_eq!(a["image"]["mediaType"], "image/jpeg");
+        assert_eq!(a["image"]["url"], "https://aperture.w33d.xyz/s/banner.jpg");
+    }
+
+    #[test]
+    fn note_object_carries_image_attachment() {
+        let c = cfg();
+        let note = Note {
+            id: "note_9".to_string(),
+            author_sub: "u_w33d".to_string(),
+            content: "with a picture".to_string(),
+            visibility: "public".to_string(),
+            created_at: 1_700_000_000,
+            updated_at: 0,
+            attachment_url: "https://aperture.w33d.xyz/s/pic.webp".to_string(),
+        };
+        let obj = note_object(&c, &note);
+        let att = &obj["attachment"][0];
+        assert_eq!(att["type"], "Document");
+        assert_eq!(att["mediaType"], "image/webp");
+        assert_eq!(att["url"], "https://aperture.w33d.xyz/s/pic.webp");
+    }
+
+    #[test]
+    fn note_object_omits_attachment_when_absent() {
+        let c = cfg();
+        let note = Note {
+            id: "note_10".to_string(),
+            author_sub: "u_w33d".to_string(),
+            content: "no picture".to_string(),
+            visibility: "public".to_string(),
+            created_at: 1_700_000_000,
+            updated_at: 0,
+            attachment_url: String::new(),
+        };
+        let obj = note_object(&c, &note);
+        assert!(obj.get("attachment").is_none());
     }
 
     #[test]
@@ -256,6 +357,7 @@ mod tests {
             visibility: "public".to_string(),
             created_at: 1_700_000_000,
             updated_at: 0,
+            attachment_url: String::new(),
         };
         let ob = outbox(&c, std::slice::from_ref(&note), 1);
         assert_eq!(ob["type"], "OrderedCollection");

@@ -192,6 +192,13 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 
 /* -------------------------------------------------------------- actor profile header */
 .profile { margin: 0 0 28px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+.profile__banner { margin: 0 0 -36px; border-radius: 12px; overflow: hidden; aspect-ratio: 3 / 1; background: var(--surface-2, #eef); }
+.profile__banner img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.profile__avatar { display: block; width: 72px; height: 72px; border-radius: 50%; object-fit: cover; border: 3px solid var(--surface, #fff); position: relative; margin: 0 0 10px; background: var(--surface-2, #eef); }
+.profile__edit { margin: 0; }
+.profile__edit > summary { list-style: none; cursor: pointer; display: inline-flex; }
+.profile__edit > summary::-webkit-details-marker { display: none; }
+.profile__edit form { margin-top: 12px; }
 .profile__name { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -.025em; color: var(--ink); }
 .profile__handle { margin-top: 3px; color: var(--accent-2); font-size: 13px; font-weight: 550; font-family: var(--mono); }
 .profile__summary { margin: 12px 0 0; color: var(--ink-2); font-size: 15px; line-height: 1.6; }
@@ -202,6 +209,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 .composer { margin-bottom: 32px; }
 .composer__body { min-height: 96px; resize: vertical; font-family: var(--font); font-size: 15px; line-height: 1.6; }
 .composer__actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.composer__url { width: 100%; font-family: var(--font); font-size: 14px; }
 
 /* -------------------------------------------------------------- note timeline */
 .note-list { display: flex; flex-direction: column; }
@@ -209,6 +217,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 .note:first-child { border-top: 0; padding-top: 4px; }
 .note__body { color: var(--ink); font-size: 15px; line-height: 1.65; word-wrap: break-word; overflow-wrap: anywhere; }
 .note__meta { margin-top: 8px; font-size: 12px; color: var(--ink-3); letter-spacing: .02em; text-transform: uppercase; }
+.note__media { margin-top: 12px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
+.note__media img { display: block; width: 100%; max-height: 520px; object-fit: cover; }
 
 /* -------------------------------------------------------------- empty + error */
 .empty-state { text-align: center; padding: 56px 24px; color: var(--ink-2); }

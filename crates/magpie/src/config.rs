@@ -24,6 +24,12 @@ pub const MAX_PAGE: usize = 100;
 /// Hard cap on a submitted tags string, in characters (before normalization).
 pub const MAX_TAGS_INPUT_CHARS: usize = 400;
 
+/// Hard cap on a stored highlight quote, in characters (the passage lifted from the article).
+pub const MAX_QUOTE_CHARS: usize = 2000;
+
+/// Hard cap on a stored highlight note, in characters (the owner's inline annotation).
+pub const MAX_NOTE_CHARS: usize = 2000;
+
 /// Hard cap on bytes read from a fetched page (the streaming reader stops here). Keeps a single
 /// clip bounded regardless of the remote `Content-Length`.
 pub const MAX_FETCH_BYTES: usize = 3 * 1024 * 1024;

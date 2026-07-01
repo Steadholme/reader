@@ -152,6 +152,46 @@ async fn pg_store_full_integration() {
     assert_eq!(by_title.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["bbbbbb22"]);
     assert!(store.search("bob", "title bbbbbb22", None, 10).await.unwrap().is_empty());
 
+    // --- highlights: add / list / dedup+note / delete, owner-scoped ---------
+    sqlx::query("DELETE FROM highlights").execute(&raw).await.unwrap();
+    use magpie::model::Highlight;
+    let hl = |id: &str, clip: &str, owner: &str, quote: &str, at: i64| Highlight {
+        id: id.to_string(),
+        clip_id: clip.to_string(),
+        owner_sub: owner.to_string(),
+        quote: quote.to_string(),
+        note: None,
+        created_at: at,
+    };
+    assert!(store.add_highlight(&hl("hl000001", "bbbbbb22", "alice", "alpha", 100)).await.unwrap());
+    assert!(store.add_highlight(&hl("hl000002", "bbbbbb22", "alice", "beta", 200)).await.unwrap());
+    assert!(store.add_highlight(&hl("hl000003", "cccccc33", "alice", "gamma", 300)).await.unwrap());
+    assert!(store.add_highlight(&hl("hl000004", "bbbbbb22", "bob", "delta", 400)).await.unwrap());
+    // id-level idempotency: re-inserting the same id is a no-op.
+    assert!(!store.add_highlight(&hl("hl000001", "bbbbbb22", "alice", "changed", 999)).await.unwrap());
+
+    // per-clip margin: oldest-first, owner-scoped (bob's highlight excluded).
+    let margin = store.list_highlights("alice", "bbbbbb22").await.unwrap();
+    assert_eq!(margin.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["hl000001", "hl000002"]);
+    // aggregate: newest-first across clips, owner-scoped.
+    let all = store.list_all_highlights("alice").await.unwrap();
+    assert_eq!(all.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["hl000003", "hl000002", "hl000001"]);
+    assert_eq!(store.list_all_highlights("bob").await.unwrap().len(), 1);
+
+    // dedup lookup + note edit (nullable column round-trips).
+    assert!(store.find_highlight_by_quote("alice", "bbbbbb22", "alpha").await.unwrap().is_some());
+    assert!(store.find_highlight_by_quote("alice", "bbbbbb22", "nope").await.unwrap().is_none());
+    assert!(store.set_highlight_note("hl000001", "alice", Some("a note".into())).await.unwrap());
+    assert_eq!(store.get_highlight("hl000001").await.unwrap().unwrap().note.as_deref(), Some("a note"));
+    assert!(store.set_highlight_note("hl000001", "alice", None).await.unwrap());
+    assert!(store.get_highlight("hl000001").await.unwrap().unwrap().note.is_none());
+    // note edit + delete are owner-scoped.
+    assert!(!store.set_highlight_note("hl000001", "bob", Some("x".into())).await.unwrap());
+    assert!(!store.delete_highlight("hl000001", "bob").await.unwrap());
+    assert!(store.delete_highlight("hl000001", "alice").await.unwrap());
+    assert!(store.get_highlight("hl000001").await.unwrap().is_none());
+
+    sqlx::query("DELETE FROM highlights").execute(&raw).await.unwrap();
     sqlx::query("DELETE FROM clips").execute(&raw).await.unwrap();
     eprintln!("pg_integration test passed.");
 }

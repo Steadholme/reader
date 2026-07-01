@@ -15,22 +15,29 @@ use axum::Form;
 use serde::Deserialize;
 
 use crate::auth::{self, Identity};
-use crate::config::{DEFAULT_PAGE, MAX_PAGE, MAX_TAGS_INPUT_CHARS, MAX_TITLE_CHARS, MAX_URL_CHARS};
+use crate::config::{
+    DEFAULT_PAGE, MAX_NOTE_CHARS, MAX_PAGE, MAX_QUOTE_CHARS, MAX_TAGS_INPUT_CHARS, MAX_TITLE_CHARS,
+    MAX_URL_CHARS,
+};
 use crate::error::AppError;
 use crate::extract;
 use crate::fetch::parse_http_url;
 use crate::handlers::{bookmarklet_href, esc, fmt_ts, userbox, APP_CSS, SHIELD_SVG};
-use crate::model::{normalize_tags, Clip, Cursor, Filter};
+use crate::model::{normalize_tags, Clip, Cursor, Filter, Highlight};
 use crate::{now_secs, random_alnum, AppState};
 
 /// Length of the short random clip id (62-symbol alphabet => ~48 bits at 8 chars; the
 /// `ON CONFLICT` insert retries on the astronomically rare collision).
 const CLIP_ID_LEN: usize = 8;
 
+/// Length of the short random highlight id (same alphabet/collision handling as the clip id).
+const HIGHLIGHT_ID_LEN: usize = 12;
+
 const INDEX_HTML: &str = include_str!("../../templates/index.html");
 const SAVE_HTML: &str = include_str!("../../templates/save.html");
 const READER_HTML: &str = include_str!("../../templates/reader.html");
 const SEARCH_HTML: &str = include_str!("../../templates/search.html");
+const HIGHLIGHTS_HTML: &str = include_str!("../../templates/highlights.html");
 
 // ---------------------------------------------------------------------------
 // GET / — reading list
@@ -294,8 +301,15 @@ pub async fn reader(
     // Marking read is the intended side effect of opening the reader (idempotent).
     let _ = state.store.mark_read(&id, &who.subject).await?;
 
+    // The clip's own highlights, shown in a margin beside the article.
+    let highlights = state
+        .store
+        .list_highlights(&who.subject, &id)
+        .await
+        .unwrap_or_default();
+
     let csrf = auth::new_csrf_token();
-    let html = render_reader(&clip, &who, &csrf);
+    let html = render_reader(&clip, &who, &csrf, &highlights);
     Ok(html_with_csrf(StatusCode::OK, html, &csrf))
 }
 
@@ -423,6 +437,170 @@ pub async fn edit_tags(
 }
 
 // ---------------------------------------------------------------------------
+// POST /r/{id}/highlight — add a highlight (+ optional note) to your own clip
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct HighlightForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    /// The passage being highlighted (copied from the article text).
+    #[serde(default)]
+    pub quote: String,
+    /// An optional inline note attached to the highlight.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// `POST /r/{id}/highlight` — CSRF-checked, ownership-scoped: add a highlight (a quote plus an
+/// optional note) to a clip, then 302 back to the reader. Re-highlighting the SAME passage is
+/// idempotent — it updates that highlight's note instead of inserting a duplicate.
+pub async fn add_highlight(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(clip_id): Path<String>,
+    Form(form): Form<HighlightForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+
+    // The clip must exist and be owned before we attach anything to it.
+    match state.store.get(&clip_id).await? {
+        Some(c) if c.owner_sub == who.subject => {}
+        Some(_) => {
+            return Err(AppError::Forbidden(
+                "You can only highlight your own clips.".to_string(),
+            ))
+        }
+        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+    }
+
+    let quote = clamp_chars(form.quote.trim(), MAX_QUOTE_CHARS);
+    if quote.is_empty() {
+        return Err(AppError::BadRequest(
+            "Select some text to highlight.".to_string(),
+        ));
+    }
+    let note = clamp_opt(form.note.trim(), MAX_NOTE_CHARS);
+
+    // Idempotent on (owner, clip, quote): re-highlighting the same passage updates its note.
+    if let Some(existing) = state
+        .store
+        .find_highlight_by_quote(&who.subject, &clip_id, &quote)
+        .await?
+    {
+        state
+            .store
+            .set_highlight_note(&existing.id, &who.subject, note)
+            .await?;
+        tracing::info!(id = existing.id, owner = who.subject, clip = clip_id, "highlight note updated");
+        return Ok(redirect_found(&format!("/r/{clip_id}")));
+    }
+
+    let mut highlight = Highlight {
+        id: String::new(),
+        clip_id: clip_id.clone(),
+        owner_sub: who.subject.clone(),
+        quote,
+        note,
+        created_at: now_secs(),
+    };
+    let mut created = false;
+    for _ in 0..6 {
+        highlight.id = random_alnum(HIGHLIGHT_ID_LEN);
+        if state.store.add_highlight(&highlight).await? {
+            created = true;
+            break;
+        }
+    }
+    if !created {
+        return Err(AppError::Internal(
+            "could not allocate a unique highlight id".to_string(),
+        ));
+    }
+    tracing::info!(id = highlight.id, owner = who.subject, clip = clip_id, "highlight added");
+    Ok(redirect_found(&format!("/r/{clip_id}")))
+}
+
+// ---------------------------------------------------------------------------
+// POST /highlight/{hid}/delete — delete one of your own highlights
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct HighlightDeleteForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    /// Where to return: `"list"` -> the "my highlights" page; anything else -> the clip reader.
+    #[serde(default)]
+    pub from: String,
+}
+
+/// `POST /highlight/{hid}/delete` — CSRF-checked, ownership-scoped delete of a single highlight,
+/// then 302 back to the reader (or the aggregate page when `from=list`).
+pub async fn delete_highlight(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(hid): Path<String>,
+    Form(form): Form<HighlightDeleteForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+
+    // Look up first so we can both enforce ownership and know which reader to return to.
+    let highlight = match state.store.get_highlight(&hid).await? {
+        Some(h) if h.owner_sub == who.subject => h,
+        Some(_) => {
+            return Err(AppError::Forbidden(
+                "You can only delete your own highlights.".to_string(),
+            ))
+        }
+        None => {
+            return Err(AppError::NotFound(
+                "No highlight exists at that link.".to_string(),
+            ))
+        }
+    };
+
+    state.store.delete_highlight(&hid, &who.subject).await?;
+    tracing::info!(id = hid, owner = who.subject, "highlight deleted");
+
+    let back = if form.from == "list" {
+        "/highlights".to_string()
+    } else {
+        format!("/r/{}", highlight.clip_id)
+    };
+    Ok(redirect_found(&back))
+}
+
+// ---------------------------------------------------------------------------
+// GET /highlights — the owner's highlights across every clip (aggregate page)
+// ---------------------------------------------------------------------------
+
+/// `GET /highlights` — every highlight the owner has made, newest-first, grouped by clip with the
+/// clip title linking back to its reader.
+pub async fn highlights(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let who = auth::identity(&headers);
+    let csrf = auth::new_csrf_token();
+
+    let items = state
+        .store
+        .list_all_highlights(&who.subject)
+        .await
+        .unwrap_or_default();
+
+    let html = render_highlights_page(&state, &who, &csrf, &items).await;
+    html_with_csrf(StatusCode::OK, html, &csrf)
+}
+
+// ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
@@ -431,6 +609,18 @@ fn clamp_chars(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
         Some((idx, _)) => s[..idx].to_string(),
         None => s.to_string(),
+    }
+}
+
+/// Truncate `s` to at most `max` chars, returning `None` when the (trimmed) result is empty — the
+/// canonical "cleared" note value that maps to a NULL column.
+fn clamp_opt(s: &str, max: usize) -> Option<String> {
+    let clamped = clamp_chars(s, max);
+    let trimmed = clamped.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -621,7 +811,7 @@ fn render_clip_item(c: &Clip, csrf: &str, filter: Filter) -> String {
     )
 }
 
-fn render_reader(clip: &Clip, who: &Identity, csrf: &str) -> String {
+fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highlight]) -> String {
     let title = display_title(clip);
     let site = if clip.site.trim().is_empty() {
         "Saved page".to_string()
@@ -663,6 +853,149 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str) -> String {
         .replace("{{DELETE}}", &delete_form)
         .replace("{{TAGS}}", &render_tags_editor(clip, csrf))
         .replace("{{CONTENT}}", &render_content(&clip.content_text))
+        .replace("{{HIGHLIGHTS}}", &render_highlights_margin(clip, csrf, highlights))
+}
+
+/// The reader's highlights margin: the add-a-highlight form (quote + optional note) followed by
+/// the clip's existing highlights, each with a delete button. All stored text is escaped.
+fn render_highlights_margin(clip: &Clip, csrf: &str, highlights: &[Highlight]) -> String {
+    let add_form = format!(
+        "<form class=\"highlight-form\" method=\"post\" action=\"/r/{id}/highlight\">\
+           <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+           <label class=\"field\">\
+             <span class=\"field-label\">Highlight a passage</span>\
+             <textarea class=\"highlight-quote\" name=\"quote\" rows=\"3\" \
+                       placeholder=\"Paste or type the passage to highlight\" required></textarea>\
+           </label>\
+           <label class=\"field\">\
+             <span class=\"field-label\">Note <span class=\"field-hint\">(optional)</span></span>\
+             <textarea class=\"highlight-note\" name=\"note\" rows=\"2\" \
+                       placeholder=\"Add a thought…\"></textarea>\
+           </label>\
+           <div class=\"actions\">\
+             <button class=\"btn btn-primary btn-sm\" type=\"submit\">Add highlight</button>\
+           </div>\
+         </form>",
+        id = esc(&clip.id),
+        csrf = esc(csrf),
+    );
+
+    let list = if highlights.is_empty() {
+        "<li class=\"highlight-item highlight-item--empty\">No highlights yet. Select a passage \
+         above to save your first one.</li>"
+            .to_string()
+    } else {
+        highlights
+            .iter()
+            .map(|h| render_highlight_item(h, csrf, false))
+            .collect::<Vec<_>>()
+            .join("")
+    };
+
+    format!(
+        "<aside class=\"reader-margin\">\
+           <div class=\"card\">\
+             <div class=\"card__head\"><h2>Highlights</h2></div>\
+             <div class=\"card__body\">{add_form}</div>\
+           </div>\
+           <ul class=\"highlight-list\">{list}</ul>\
+         </aside>",
+        add_form = add_form,
+        list = list,
+    )
+}
+
+/// One highlight: the quote (as a blockquote), the optional note, a creation timestamp, and a
+/// CSRF-guarded delete form. `on_list` picks the return target for the delete redirect. On the
+/// aggregate page the quote also links back to its clip's reader.
+fn render_highlight_item(h: &Highlight, csrf: &str, on_list: bool) -> String {
+    let note = match &h.note {
+        Some(n) if !n.trim().is_empty() => {
+            format!("<p class=\"highlight-note-text\">{}</p>", esc(n))
+        }
+        _ => String::new(),
+    };
+    let from = if on_list { "list" } else { "reader" };
+    let open = if on_list {
+        format!(
+            "<a class=\"btn btn-ghost btn-sm\" href=\"/r/{id}\">Open</a>",
+            id = esc(&h.clip_id),
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<li class=\"highlight-item\">\
+           <blockquote class=\"highlight-quote-text\">{quote}</blockquote>\
+           {note}\
+           <div class=\"highlight-meta\">\
+             <span class=\"highlight-time\">Highlighted {when}</span>\
+             {open}\
+             <form class=\"inline-form\" method=\"post\" action=\"/highlight/{hid}/delete\">\
+               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+               <input type=\"hidden\" name=\"from\" value=\"{from}\">\
+               <button class=\"btn btn-danger btn-sm\" type=\"submit\">Delete</button>\
+             </form>\
+           </div>\
+         </li>",
+        quote = esc(&h.quote),
+        note = note,
+        when = esc(&fmt_ts(h.created_at)),
+        open = open,
+        hid = esc(&h.id),
+        csrf = esc(csrf),
+        from = from,
+    )
+}
+
+/// Render the "my highlights" aggregate page: every highlight grouped under its clip title.
+async fn render_highlights_page(
+    state: &AppState,
+    who: &Identity,
+    csrf: &str,
+    items: &[Highlight],
+) -> String {
+    let body = if items.is_empty() {
+        "<ul class=\"highlight-list\"><li class=\"highlight-item highlight-item--empty\">You have \
+         not highlighted anything yet. Open a clip and highlight a passage to see it here.</li></ul>"
+            .to_string()
+    } else {
+        // Group consecutive highlights by clip (the list is already ordered newest-first, so a
+        // clip's highlights stay together). Fetch each clip's title once for the group header.
+        let mut out = String::new();
+        let mut current_clip: Option<String> = None;
+        for h in items {
+            if current_clip.as_deref() != Some(h.clip_id.as_str()) {
+                if current_clip.is_some() {
+                    out.push_str("</ul></section>");
+                }
+                let title = match state.store.get(&h.clip_id).await {
+                    Ok(Some(c)) if c.owner_sub == who.subject => display_title(&c),
+                    _ => "Saved clip".to_string(),
+                };
+                out.push_str(&format!(
+                    "<section class=\"highlight-group\">\
+                       <h2 class=\"highlight-group__title\">\
+                         <a href=\"/r/{id}\">{title}</a>\
+                       </h2><ul class=\"highlight-list\">",
+                    id = esc(&h.clip_id),
+                    title = esc(&title),
+                ));
+                current_clip = Some(h.clip_id.clone());
+            }
+            out.push_str(&render_highlight_item(h, csrf, true));
+        }
+        if current_clip.is_some() {
+            out.push_str("</ul></section>");
+        }
+        out
+    };
+
+    HIGHLIGHTS_HTML
+        .replace("{{CSS}}", APP_CSS)
+        .replace("{{SHIELD}}", SHIELD_SVG)
+        .replace("{{USERBOX}}", &userbox("Highlights", Some(&who.email)))
+        .replace("{{BODY}}", &body)
 }
 
 /// The reader's tags row: the current tag chips plus an inline edit form (comma-separated). The

@@ -59,7 +59,8 @@ pub async fn actor(State(state): State<AppState>, Path(name): Path<String>) -> R
     if !is_our_actor(&state, &name) {
         return plain(StatusCode::NOT_FOUND, "no such actor");
     }
-    activity_json(activitypub::actor(&state.config, &state.signer.public_pem))
+    let profile = state.store.get_profile().await;
+    activity_json(activitypub::actor(&state.config, &state.signer.public_pem, &profile))
 }
 
 /// `GET /users/{name}/outbox` — OrderedCollection of public notes (Create activities).

@@ -242,6 +242,111 @@ async fn full_microblog_and_activitypub_flow() {
     let create = r#"{"type":"Create","actor":"https://remote.example/users/bob","object":{"type":"Note","content":"hi"}}"#;
     let (status, _, _) = call(&state, post_json("/inbox", create)).await;
     assert_eq!(status, StatusCode::ACCEPTED);
+
+    // --- media attachment: compose a note with an image URL ----------------
+    let form = "content=look+at+this&attachment_url=https%3A%2F%2Faperture.w33d.xyz%2Fs%2Fpic.png&csrf_token="
+        .to_string()
+        + CSRF;
+    let (status, _, _) = call(&state, post_csrf("/api/notes", &form, Some(("u_w33d", "w@hf")))).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "note-with-attachment created");
+
+    // The timeline renders the image inline (escaped src).
+    let (_, _, body) = call(&state, get_auth("/", "u_w33d", "w@hf")).await;
+    assert!(
+        body.contains(r#"src="https://aperture.w33d.xyz/s/pic.png""#),
+        "attachment image rendered on timeline"
+    );
+
+    // The outbox Note carries an `attachment` Document (mediaType + url).
+    let (_, _, body) = call(&state, get("/users/w33d/outbox")).await;
+    let ob: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let found = ob["orderedItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|i| {
+            let att = &i["object"]["attachment"][0];
+            (att["url"] == "https://aperture.w33d.xyz/s/pic.png").then(|| att.clone())
+        })
+        .expect("a Note with the attachment Document is in the outbox");
+    assert_eq!(found["type"], "Document");
+    assert_eq!(found["mediaType"], "image/png");
+
+    // A non-http(s) attachment URL is rejected (blocks javascript:/data: injection) -> 400.
+    let form = "content=evil&attachment_url=javascript%3Aalert(1)&csrf_token=".to_string() + CSRF;
+    let (status, _, _) = call(&state, post_csrf("/api/notes", &form, Some(("u_w33d", "w@hf")))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "javascript: attachment rejected");
+
+    // --- profile images: set avatar (icon) + header (image) ----------------
+    // Guard: no identity -> 401.
+    let (status, _, _) = call(
+        &state,
+        post_csrf("/api/profile", &format!("avatar_url=&header_url=&csrf_token={CSRF}"), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "profile without identity -> 401");
+
+    // Bad CSRF -> 401.
+    let (status, _, _) = call(
+        &state,
+        post_csrf(
+            "/api/profile",
+            "avatar_url=&header_url=&csrf_token=WRONG",
+            Some(("u_w33d", "w@hf")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "profile CSRF mismatch -> 401");
+
+    // A non-http(s) avatar URL -> 400.
+    let (status, _, _) = call(
+        &state,
+        post_csrf(
+            "/api/profile",
+            &format!("avatar_url=data%3Aimage%2Fpng&header_url=&csrf_token={CSRF}"),
+            Some(("u_w33d", "w@hf")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "data: avatar rejected");
+
+    // Valid set -> 303.
+    let prof = "avatar_url=https%3A%2F%2Faperture.w33d.xyz%2Fs%2Favatar.jpg\
+                &header_url=https%3A%2F%2Faperture.w33d.xyz%2Fs%2Fbanner.png&csrf_token="
+        .to_string()
+        + CSRF;
+    let (status, _, _) = call(&state, post_csrf("/api/profile", &prof, Some(("u_w33d", "w@hf")))).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "profile set -> 303");
+
+    // The public Actor document surfaces the avatar as `icon` and header as `image`.
+    let (_, _, body) = call(&state, get("/users/w33d")).await;
+    let actor: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(actor["icon"]["type"], "Image");
+    assert_eq!(actor["icon"]["url"], "https://aperture.w33d.xyz/s/avatar.jpg");
+    assert_eq!(actor["icon"]["mediaType"], "image/jpeg");
+    assert_eq!(actor["image"]["type"], "Image");
+    assert_eq!(actor["image"]["url"], "https://aperture.w33d.xyz/s/banner.png");
+    assert_eq!(actor["image"]["mediaType"], "image/png");
+
+    // The timeline shows the avatar + banner images.
+    let (_, _, body) = call(&state, get_auth("/", "u_w33d", "w@hf")).await;
+    assert!(body.contains("profile__avatar"), "avatar rendered on timeline");
+    assert!(
+        body.contains(r#"src="https://aperture.w33d.xyz/s/avatar.jpg""#),
+        "avatar src on timeline"
+    );
+    assert!(body.contains("profile__banner"), "header banner rendered on timeline");
+
+    // Clearing the header (empty field) removes `image` from the Actor JSON.
+    let prof = "avatar_url=https%3A%2F%2Faperture.w33d.xyz%2Fs%2Favatar.jpg&header_url=&csrf_token="
+        .to_string()
+        + CSRF;
+    let (status, _, _) = call(&state, post_csrf("/api/profile", &prof, Some(("u_w33d", "w@hf")))).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (_, _, body) = call(&state, get("/users/w33d")).await;
+    let actor: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(actor["icon"]["url"], "https://aperture.w33d.xyz/s/avatar.jpg");
+    assert!(actor.get("image").is_none(), "cleared header removes actor image");
 }
 
 // ---------------------------------------------------------------------------
