@@ -53,8 +53,13 @@ pub fn require_author(headers: &HeaderMap) -> Result<(String, String), AppError>
     Ok((sub, email))
 }
 
-/// Group names that authorize the admin panel. Membership in ANY of these opens `/admin`.
+/// The two GLOBAL admin groups that authorize every crate's `/admin`. These are ALWAYS in effect
+/// (nothing that works today breaks) and act as the default seed for [`admin_groups`].
 pub const ADMIN_GROUPS: &[&str] = &["admins", "infra-admins"];
+
+/// Crier's product-facing surface is "social" (social.w33d.xyz), so its DELEGATED admin group is
+/// `social-admins`. Overridable via `CRIER_ADMIN_GROUP`. See [`admin_groups`].
+const PRODUCT_ADMIN_GROUP: &str = "social-admins";
 
 /// The authenticated user's groups, parsed from the comma-separated `X-Auth-Groups` header
 /// (injected AND HMAC-verified by the gateway, so it is trustworthy). Empty when absent/blank.
@@ -75,10 +80,33 @@ pub fn has_group(headers: &HeaderMap, group: &str) -> bool {
     author_groups(headers).iter().any(|g| g == group)
 }
 
-/// Whether the authenticated user is in ANY [`ADMIN_GROUPS`] entry.
+/// Delegated admin: the effective admin-group set is the two globals ([`ADMIN_GROUPS`]) PLUS a
+/// product-specific group (`social-admins` by default, or `CRIER_ADMIN_GROUP`). This lets an
+/// operator hand someone Crier's blocklist/moderation panel via Census WITHOUT granting estate-wide
+/// admin. Resolved ONCE from the environment; the two globals are ALWAYS present, so this is purely
+/// additive — existing `admins`/`infra-admins` behavior is unchanged, and until an operator assigns
+/// the product group to someone it authorizes no one.
+fn admin_groups() -> &'static [String] {
+    static GROUPS: OnceLock<Vec<String>> = OnceLock::new();
+    GROUPS.get_or_init(|| {
+        let product = std::env::var("CRIER_ADMIN_GROUP")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| PRODUCT_ADMIN_GROUP.to_string());
+        let mut groups: Vec<String> = ADMIN_GROUPS.iter().map(|s| s.to_string()).collect();
+        if !groups.iter().any(|g| g == &product) {
+            groups.push(product);
+        }
+        groups
+    })
+}
+
+/// Whether the authenticated user is in ANY effective admin group (the two globals plus the
+/// resolved product group — see [`admin_groups`]).
 pub fn is_admin(headers: &HeaderMap) -> bool {
     let groups = author_groups(headers);
-    ADMIN_GROUPS.iter().any(|a| groups.iter().any(|g| g == a))
+    admin_groups().iter().any(|a| groups.iter().any(|g| g == a))
 }
 
 /// Require admin group membership for an `/admin` action. `Forbidden` (403) when the authenticated
@@ -316,6 +344,13 @@ mod tests {
         a2.insert(HEADER_GROUPS, "admins".parse().unwrap());
         assert!(is_admin(&a2));
         assert!(require_admin(&a2).is_ok());
+
+        // delegated admin: the product group (`social-admins`, the CRIER_ADMIN_GROUP default) also
+        // authorizes the panel WITHOUT any global admin group present.
+        let mut delegated = HeaderMap::new();
+        delegated.insert(HEADER_GROUPS, "readers,social-admins".parse().unwrap());
+        assert!(is_admin(&delegated), "social-admins is a delegated admin group");
+        assert!(require_admin(&delegated).is_ok());
 
         // a non-admin group alone does not authorize.
         let mut other = HeaderMap::new();
