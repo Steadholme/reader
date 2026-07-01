@@ -22,9 +22,10 @@
 //!     * `POST /inbox`                        — instance shared inbox (same handler)
 //!     * `GET  /outbox`                       — alias of the single user's outbox
 //!
-//! Outbound federation delivery (Accept on Follow, Create fan-out) is best-effort and UNSIGNED so it
-//! never pulls OpenSSL; the local microblog + actor/outbox JSON are correct regardless of whether
-//! any remote ever talks to Crier.
+//! Outbound federation delivery (Accept on Follow, Create fan-out, Follow of a remote) is best-effort
+//! and SIGNED with the actor's RSA key (draft-cavage HTTP Signatures, as Mastodon expects); inbound
+//! POSTs can be signature-verified (`CRIER_VERIFY_INBOX`). The local microblog + actor/outbox JSON
+//! are correct regardless of whether any remote ever talks to Crier.
 
 pub mod activitypub;
 pub mod audit;
@@ -33,6 +34,7 @@ pub mod config;
 pub mod error;
 pub mod federation;
 pub mod handlers;
+pub mod httpsig;
 pub mod store;
 
 use std::sync::Arc;
@@ -54,6 +56,9 @@ pub struct AppState {
     pub store: Arc<dyn Store>,
     pub http: reqwest::Client,
     pub audit: AuditSink,
+    /// The actor's HTTP-Signature signing identity (RSA private key + published `publicKeyPem`).
+    /// Signs every outbound delivery and backs the actor document's `publicKey`.
+    pub signer: Arc<httpsig::Signer>,
 }
 
 /// Build the router wiring both surfaces onto `state`.
@@ -65,9 +70,11 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(handlers::health::healthz))
         // --- SSO web surface ---
         .route("/", get(handlers::web::index))
+        .route("/home", get(handlers::web::home))
         .route("/api/notes", post(handlers::web::create_note))
         .route("/api/notes/{id}/edit", post(handlers::web::edit_note))
         .route("/api/notes/{id}/delete", post(handlers::web::delete_note))
+        .route("/api/follow", post(handlers::web::follow_remote))
         // --- public ActivityPub + WebFinger surface ---
         .route("/.well-known/webfinger", get(handlers::ap::webfinger))
         .route("/users/{name}", get(handlers::ap::actor))
@@ -106,12 +113,47 @@ async fn require_gateway_sig(
 /// audit sink (no network). Used by `main`'s memory mode and the integration tests, so they need NO
 /// database and NO external services.
 pub fn build_dev_state() -> AppState {
+    let config = Arc::new(Config::dev());
+    // A fresh in-process keypair — the in-memory store is ephemeral, so there is nothing to persist
+    // and nothing to restore. Real signing/verification still runs against this key.
+    let keypair = httpsig::generate_keypair().expect("dev keypair generation");
+    let signer = Arc::new(
+        httpsig::Signer::load(config.key_id(), &keypair.private_pem, keypair.public_pem)
+            .expect("dev signer load"),
+    );
     AppState {
-        config: Arc::new(Config::dev()),
+        config,
         store: Arc::new(InMemoryStore::new()),
         http: federation::build_http_client(),
         audit: AuditSink::disabled(),
+        signer,
     }
+}
+
+/// Load the actor's signing identity from the store, generating + persisting a keypair on first
+/// run. The first writer wins (`set_actor_key` is idempotent), so a restart re-publishes the SAME
+/// `publicKeyPem` that remote servers have already cached.
+pub async fn ensure_signer(store: &Arc<dyn Store>, config: &Config) -> Result<Arc<httpsig::Signer>, String> {
+    let key = match store.get_actor_key().await {
+        Some(k) => k,
+        None => {
+            tracing::info!("no actor key found — generating a new RSA keypair");
+            let kp = httpsig::generate_keypair()?;
+            let key = crate::store::ActorKey {
+                private_pem: kp.private_pem,
+                public_pem: kp.public_pem,
+                created_at: now_secs(),
+            };
+            store
+                .set_actor_key(&key)
+                .await
+                .map_err(|e| format!("persist actor key: {e}"))?;
+            // Re-read so a concurrent bootstrapper that won the race hands us the winning key.
+            store.get_actor_key().await.unwrap_or(key)
+        }
+    };
+    let signer = httpsig::Signer::load(config.key_id(), &key.private_pem, key.public_pem)?;
+    Ok(Arc::new(signer))
 }
 
 /// Build runtime state from the environment.
@@ -144,6 +186,9 @@ pub async fn build_state_from_env() -> Result<AppState, String> {
         other => return Err(format!("unknown CRIER_STORE={other} (use memory|postgres)")),
     };
 
+    // Load (or first-run generate + persist) the actor's HTTP-Signature keypair before serving.
+    let signer = ensure_signer(&store, &config).await?;
+
     let audit = AuditSink::start(
         env_truthy("AUDIT_ENABLED"),
         &env_nonempty("WATCHTOWER_URL").unwrap_or_default(),
@@ -163,6 +208,7 @@ pub async fn build_state_from_env() -> Result<AppState, String> {
         store,
         http: federation::build_http_client(),
         audit,
+        signer,
     })
 }
 

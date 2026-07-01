@@ -179,11 +179,16 @@ async fn build_social() -> Result<Router, String> {
         &crier::config::env_nonempty("WATCHTOWER_URL").unwrap_or_default(),
         crier::config::env_nonempty("AUDIT_INGEST_TOKEN").as_deref(),
     );
+    let store: Arc<dyn crier::store::Store> = Arc::new(pg);
+    let config = crier::config::Config::from_env();
+    // Load-or-generate the actor's RSA HTTP-Signature keypair (backs outbound signing + publicKey).
+    let signer = crier::ensure_signer(&store, &config).await?;
     let state = crier::AppState {
-        config: Arc::new(crier::config::Config::from_env()),
-        store: Arc::new(pg),
+        config: Arc::new(config),
+        store,
         http: crier::federation::build_http_client(),
         audit,
+        signer,
     };
     Ok(crier::app(state))
 }

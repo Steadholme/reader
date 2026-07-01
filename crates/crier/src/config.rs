@@ -32,9 +32,15 @@ pub struct Config {
     /// Profile summary / bio (`CRIER_SUMMARY`).
     pub summary: String,
     /// When true (`CRIER_FEDERATE`, default on), attempt best-effort outbound delivery (Accept on
-    /// Follow, Create fan-out). Delivery is unsigned and degrades gracefully; turning it off keeps
-    /// the local microblog + actor/outbox JSON fully functional with no network at all.
+    /// Follow, Create fan-out). Deliveries are HTTP-Signature signed with the actor key; turning it
+    /// off keeps the local microblog + actor/outbox JSON fully functional with no network at all.
     pub federate: bool,
+    /// When true (`CRIER_VERIFY_INBOX`, default OFF), inbound POSTs to the inbox MUST carry a valid
+    /// draft-cavage HTTP Signature (verified against the sender's fetched public key) or they are
+    /// rejected `401`. Off by default so the network-free dev/test path (which cannot dereference a
+    /// remote key) keeps working; production sets it on — the same env-gated posture as
+    /// `GATEWAY_HMAC_KEY`.
+    pub verify_inbox: bool,
 }
 
 impl Config {
@@ -47,6 +53,7 @@ impl Config {
             display_name: DEFAULT_ACTOR.to_string(),
             summary: DEFAULT_SUMMARY.to_string(),
             federate: true,
+            verify_inbox: false,
         }
     }
 
@@ -73,7 +80,18 @@ impl Config {
                 "on" | "true" | "1" | "yes"
             );
         }
+        if let Some(v) = env_nonempty("CRIER_VERIFY_INBOX") {
+            config.verify_inbox = matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "on" | "true" | "1" | "yes"
+            );
+        }
         config
+    }
+
+    /// The `keyId` remotes dereference to fetch our public key (`<actor_url>#main-key`).
+    pub fn key_id(&self) -> String {
+        format!("{}#main-key", self.actor_url())
     }
 
     /// `acct:` handle, e.g. `w33d@social.w33d.xyz` (the WebFinger subject without the scheme).

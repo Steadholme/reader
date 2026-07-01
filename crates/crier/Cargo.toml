@@ -35,14 +35,25 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 # Epoch <-> RFC3339 for the ActivityPub `published` timestamps and the UTC date in the timeline
 # UI (std only — no C deps). `formatting` enables the well-known Rfc3339 description.
-time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "parsing"] }
 # CSPRNG bytes for the double-submit CSRF token; `hex` encodes it (matches inkwell).
 getrandom = "0.2"
 hex = "0.4"
+# ActivityPub HTTP Signatures (draft-cavage, as Mastodon expects): a pure-Rust RSA implementation
+# (NO OpenSSL — matches the estate's rustls-only posture). Generates/loads the actor RSA keypair,
+# signs outbound deliveries (RSASSA-PKCS1-v1_5 / SHA-256) and verifies inbound POSTs. `pem` gives
+# PKCS#8 / SPKI PEM encode+decode for the persisted key + the actor's publicKeyPem.
+rsa = "0.9"
+# The CSPRNG rsa's key generation draws from (OS entropy, no C deps). Pinned to rsa's rand_core 0.6.
+rand_core = { version = "0.6", features = ["getrandom"] }
+# base64 for the HTTP Signature value + the `Digest: SHA-256=…` header (standard, not base64url).
+base64 = "0.22"
 # HMAC-SHA256 verification of the gateway-injected identity signature (X-Auth-Sig). Shared
 # primitive with the rest of the estate; the canonical message matches Sluice's Go signer.
 hmac = "0.12"
-sha2 = "0.10"
+# `oid` lets `Sha256` carry its DigestInfo OID, which rsa's PKCS#1 v1.5 SigningKey/VerifyingKey
+# require to build the prefixed signature (RSASSA-PKCS1-v1_5 / SHA-256). Additive for the HMAC use.
+sha2 = { version = "0.10", features = ["oid"] }
 # Best-effort outbound federation delivery (Accept on Follow, Create fan-out) + inbox discovery.
 # rustls (NO OpenSSL), JSON helpers. default-features off so no native-tls/openssl is dragged in —
 # the binary stays glibc-only, matching the estate posture. Federation degrades gracefully when a

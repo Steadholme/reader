@@ -16,7 +16,7 @@ use crate::auth;
 use crate::config::MAX_CONTENT_CHARS;
 use crate::error::AppError;
 use crate::handlers::{esc, fmt_date, render_note_html, topbar, APP_CSS};
-use crate::store::Note;
+use crate::store::{Following, HomeNote, Note};
 use crate::{federation, now_nanos, now_secs, AppState};
 
 const TIMELINE_HTML: &str = include_str!("../../templates/timeline.html");
@@ -102,7 +102,8 @@ pub async fn create_note(
         let client = state.http.clone();
         let cfg = state.config.clone();
         let store = state.store.clone();
-        tokio::spawn(federation::deliver_note(client, cfg, store, note));
+        let signer = state.signer.clone();
+        tokio::spawn(federation::deliver_note(client, cfg, store, signer, note));
     }
 
     Ok(redirect("/"))
@@ -158,7 +159,8 @@ pub async fn edit_note(
             let client = state.http.clone();
             let cfg = state.config.clone();
             let store = state.store.clone();
-            tokio::spawn(federation::deliver_update(client, cfg, store, note));
+            let signer = state.signer.clone();
+            tokio::spawn(federation::deliver_update(client, cfg, store, signer, note));
         }
     }
 
@@ -191,10 +193,131 @@ pub async fn delete_note(
         let client = state.http.clone();
         let cfg = state.config.clone();
         let store = state.store.clone();
-        tokio::spawn(federation::deliver_delete(client, cfg, store, id));
+        let signer = state.signer.clone();
+        tokio::spawn(federation::deliver_delete(client, cfg, store, signer, id));
     }
 
     Ok(redirect("/"))
+}
+
+/// Follow form body for `POST /api/follow`. Identity is NEVER taken from the form.
+#[derive(Debug, Deserialize)]
+pub struct FollowForm {
+    /// A remote actor URL (`https://…/users/foo`) or an `acct` handle (`foo@domain`).
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub csrf_token: String,
+}
+
+/// `POST /api/follow` — follow a REMOTE actor: record the follow, deliver a signed `Follow`, bounce
+/// to `/home`. A direct actor URL is recorded immediately (so the home timeline gates correctly);
+/// an `acct` handle is resolved via WebFinger inside the spawned delivery task.
+pub async fn follow_remote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<FollowForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+
+    let target = form.target.trim().to_string();
+    if target.is_empty() {
+        return Err(AppError::InvalidRequest("a remote actor is required".to_string()));
+    }
+
+    // A direct actor URL is recorded up front so `is_following` gates the home timeline even before
+    // the async delivery resolves the inbox. A handle is left to the task's WebFinger step.
+    if target.starts_with("http://") || target.starts_with("https://") {
+        state
+            .store
+            .add_following(&Following {
+                actor: target.clone(),
+                inbox_url: String::new(),
+                created_at: now_secs(),
+            })
+            .await?;
+    }
+
+    state.audit.emit(AuditEvent::notice(
+        "crier.following.add",
+        &sub,
+        &target,
+        "follow",
+    ));
+
+    if state.config.federate {
+        let client = state.http.clone();
+        let cfg = state.config.clone();
+        let store = state.store.clone();
+        let signer = state.signer.clone();
+        tokio::spawn(federation::follow_target(client, cfg, store, signer, target));
+    }
+
+    Ok(redirect("/home"))
+}
+
+/// `GET /home` — the home timeline: notes delivered by the remote actors we follow, newest-first.
+pub async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let email = auth::display_email(&headers);
+    let (_csrf, set_cookie) = auth::ensure_csrf(&headers);
+
+    let notes = state.store.list_home_notes().await;
+    let following = state.store.list_following().await;
+
+    let mut items = String::new();
+    if notes.is_empty() {
+        items.push_str(
+            r#"<div class="empty-state"><h2>Your home is quiet</h2><p>Follow a remote actor from the timeline; their posts will stream in here.</p></div>"#,
+        );
+    } else {
+        for n in &notes {
+            items.push_str(&render_home_note(n));
+        }
+    }
+
+    let page = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Home · Crier · HOLDFAST</title><style>{css}</style></head>
+<body class="page-reading">
+{topbar}
+<main class="reader">
+  <div class="profile">
+    <h1 class="profile__name">Home timeline</h1>
+    <p class="profile__summary">Posts from the {following} remote actor(s) you follow.</p>
+    <div class="profile__stats"><span><a class="btn btn-ghost btn-sm" href="/">&larr; Your profile</a></span></div>
+  </div>
+  <div class="note-list">
+    {items}
+  </div>
+</main>
+</body></html>"#,
+        css = APP_CSS,
+        topbar = topbar("Home", &email),
+        following = following.len(),
+        items = items,
+    );
+
+    html_with_cookie(page, set_cookie)
+}
+
+/// One home-timeline card: the source actor + the (escaped) remote content + a UTC date.
+fn render_home_note(note: &HomeNote) -> String {
+    let when = if note.published > 0 { note.published } else { note.received_at };
+    format!(
+        r#"<article class="note">
+  <div class="note__meta"><a href="{url}" rel="noopener noreferrer">{actor}</a></div>
+  <div class="note__body">{body}</div>
+  <div class="note__meta">{date}</div>
+</article>"#,
+        url = esc(&note.url),
+        actor = esc(&note.actor),
+        body = render_note_html(&note.content),
+        date = esc(&fmt_date(when)),
+    )
 }
 
 /// Trim + length-validate note content, returning the trimmed slice or an `InvalidRequest`.

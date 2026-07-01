@@ -5,11 +5,10 @@
 //! tested. Note CONTENT is HTML-escaped into a `<p>…</p>` fragment by [`content_to_html`], so a
 //! remote that renders our notes can never receive script/markup we did not intend.
 //!
-//! Federation NOTE: Crier serves a fully correct actor / outbox / WebFinger and accepts inbound
-//! activities, but it does NOT sign its outbound deliveries (HTTP Signatures would risk pulling
-//! OpenSSL). The actor therefore omits a `publicKey`; remote servers that require signed delivery
-//! will reject our pushes — that is the documented best-effort degradation. Inbound + local
-//! correctness is unaffected.
+//! Federation NOTE: Crier serves a fully correct actor / outbox / WebFinger, publishes the actor's
+//! `publicKey` (see [`crate::httpsig`]), SIGNS every outbound delivery (draft-cavage HTTP
+//! Signatures), and can verify inbound POSTs. Local correctness is independent of federation — the
+//! microblog + actor/outbox JSON stay correct even with no remote reachable.
 
 use serde_json::{json, Value};
 
@@ -55,11 +54,14 @@ pub fn webfinger(cfg: &Config) -> Value {
     })
 }
 
-/// The ActivityPub Actor (Person) document.
-pub fn actor(cfg: &Config) -> Value {
+/// The ActivityPub Actor (Person) document, publishing the actor's `publicKey` / `publicKeyPem` so
+/// remotes can verify our signed deliveries and we can be followed. The `@context` gains the
+/// security vocabulary that defines `publicKey` (what Mastodon and friends expect).
+pub fn actor(cfg: &Config, public_pem: &str) -> Value {
     json!({
         "@context": [
-            "https://www.w3.org/ns/activitystreams"
+            "https://www.w3.org/ns/activitystreams",
+            "https://w3id.org/security/v1"
         ],
         "id": cfg.actor_url(),
         "type": "Person",
@@ -72,6 +74,11 @@ pub fn actor(cfg: &Config) -> Value {
         "followers": cfg.followers_url(),
         "manuallyApprovesFollowers": false,
         "discoverable": true,
+        "publicKey": {
+            "id": cfg.key_id(),
+            "owner": cfg.actor_url(),
+            "publicKeyPem": public_pem
+        },
         "endpoints": {
             "sharedInbox": cfg.shared_inbox_url()
         }
@@ -172,6 +179,18 @@ pub fn followers_collection(cfg: &Config, followers: &[Follower], total: i64) ->
     })
 }
 
+/// A `Follow` activity we send to a REMOTE actor. `stamp` makes the activity id unique; `object`
+/// is the remote actor id we want to follow.
+pub fn follow_activity(cfg: &Config, remote_actor: &str, stamp: &str) -> Value {
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{}#follows/{}", cfg.actor_url(), stamp),
+        "type": "Follow",
+        "actor": cfg.actor_url(),
+        "object": remote_actor
+    })
+}
+
 /// An `Accept` activity acknowledging an inbound `Follow`. `follow` is echoed back verbatim as the
 /// object (per the ActivityPub spec) and `stamp` makes the activity id unique.
 pub fn accept_activity(cfg: &Config, follow: &Value, stamp: &str) -> Value {
@@ -213,16 +232,18 @@ mod tests {
     }
 
     #[test]
-    fn actor_has_required_fields_and_no_public_key() {
-        let a = actor(&cfg());
+    fn actor_has_required_fields_and_public_key() {
+        let a = actor(&cfg(), "-----BEGIN PUBLIC KEY-----\nMII...\n-----END PUBLIC KEY-----\n");
         assert_eq!(a["type"], "Person");
         assert_eq!(a["id"], "https://social.w33d.xyz/users/w33d");
         assert_eq!(a["preferredUsername"], "w33d");
         assert_eq!(a["inbox"], "https://social.w33d.xyz/users/w33d/inbox");
         assert_eq!(a["outbox"], "https://social.w33d.xyz/users/w33d/outbox");
         assert_eq!(a["endpoints"]["sharedInbox"], "https://social.w33d.xyz/inbox");
-        // Degraded (unsigned) mode: no publicKey is advertised.
-        assert!(a.get("publicKey").is_none());
+        // Signed mode: the actor advertises its HTTP-Signature public key.
+        assert_eq!(a["publicKey"]["id"], "https://social.w33d.xyz/users/w33d#main-key");
+        assert_eq!(a["publicKey"]["owner"], "https://social.w33d.xyz/users/w33d");
+        assert!(a["publicKey"]["publicKeyPem"].as_str().unwrap().contains("BEGIN PUBLIC KEY"));
     }
 
     #[test]

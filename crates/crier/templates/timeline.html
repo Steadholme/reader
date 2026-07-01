@@ -35,6 +35,22 @@
     </div>
   </section>
 
+  <section class="card composer">
+    <div class="card__body">
+      <form method="post" action="/api/follow">
+        <input type="hidden" name="csrf_token" value="{{CSRF}}">
+        <div class="field">
+          <label for="follow-target">Follow a remote actor</label>
+          <input id="follow-target" name="target" class="composer__body" placeholder="https://mastodon.social/users/Gargron  ·  or  ·  Gargron@mastodon.social" required>
+        </div>
+        <div class="composer__actions">
+          <a class="btn btn-ghost" href="/home">Home timeline &rarr;</a>
+          <button class="btn btn-primary" type="submit">Follow</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
   <div class="note-list">
     {{ITEMS}}
   </div>

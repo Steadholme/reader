@@ -42,6 +42,44 @@ pub struct Follower {
     pub created_at: i64,
 }
 
+/// The single actor's persisted RSA keypair (maps 1:1 to the one `actor_keys` row). Kept in the
+/// store so a restart re-publishes the SAME `publicKeyPem` remotes have already cached.
+#[derive(Clone, Debug)]
+pub struct ActorKey {
+    /// PKCS#8 PEM private key — never leaves the process.
+    pub private_pem: String,
+    /// SPKI PEM public key — published as the actor's `publicKeyPem`.
+    pub public_pem: String,
+    pub created_at: i64,
+}
+
+/// A REMOTE actor WE follow (maps 1:1 to a `following` row). The mirror of [`Follower`].
+#[derive(Clone, Debug)]
+pub struct Following {
+    /// The remote actor id URL we sent a `Follow` to (the PRIMARY KEY).
+    pub actor: String,
+    /// The remote actor's resolved inbox URL (where the signed `Follow` was delivered).
+    pub inbox_url: String,
+    pub created_at: i64,
+}
+
+/// A note delivered into our home timeline by a remote we follow (maps 1:1 to a `home_notes` row).
+#[derive(Clone, Debug)]
+pub struct HomeNote {
+    /// The remote Note's object id URL (the PRIMARY KEY — dedupes re-deliveries).
+    pub id: String,
+    /// The authoring remote actor id URL.
+    pub actor: String,
+    /// The note's HTML content, exactly as the remote sent it (rendered escaped in the UI).
+    pub content: String,
+    /// A human URL for the note (falls back to `id` when the remote omits one).
+    pub url: String,
+    /// The remote's `published` time in epoch seconds (0 when unparseable).
+    pub published: i64,
+    /// When Crier received it, epoch seconds (the home-timeline sort key).
+    pub received_at: i64,
+}
+
 /// Storage failure surfaced to the handler layer.
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -87,6 +125,24 @@ pub trait Store: Send + Sync {
     async fn add_follower(&self, follower: &Follower) -> Result<(), StoreError>;
     /// Remove a follower by actor id (an `Undo` of a `Follow`).
     async fn remove_follower(&self, actor: &str) -> Result<(), StoreError>;
+
+    /// The persisted actor keypair, or `None` before it has ever been generated.
+    async fn get_actor_key(&self) -> Option<ActorKey>;
+    /// Persist (once) the actor keypair. Idempotent: a second write with a key already present is a
+    /// no-op, so a race between two bootstrappers never rotates the published key.
+    async fn set_actor_key(&self, key: &ActorKey) -> Result<(), StoreError>;
+
+    /// Every remote actor we follow, newest-first.
+    async fn list_following(&self) -> Vec<Following>;
+    /// True when `actor` is a remote we follow (gates whether their Notes enter the home timeline).
+    async fn is_following(&self, actor: &str) -> bool;
+    /// Record/refresh a remote we follow. Idempotent on the actor id.
+    async fn add_following(&self, following: &Following) -> Result<(), StoreError>;
+
+    /// Home-timeline notes delivered by remotes we follow, newest-first, capped at [`LIST_LIMIT`].
+    async fn list_home_notes(&self) -> Vec<HomeNote>;
+    /// Record a delivered remote note. Idempotent on the note id (a re-delivery is dropped).
+    async fn add_home_note(&self, note: &HomeNote) -> Result<(), StoreError>;
 }
 
 // --------------------------------------------------------------------------------------
@@ -97,6 +153,9 @@ pub trait Store: Send + Sync {
 pub struct InMemoryStore {
     notes: Mutex<Vec<Note>>,
     followers: Mutex<Vec<Follower>>,
+    actor_key: Mutex<Option<ActorKey>>,
+    following: Mutex<Vec<Following>>,
+    home_notes: Mutex<Vec<HomeNote>>,
 }
 
 impl InMemoryStore {
@@ -202,6 +261,65 @@ impl Store for InMemoryStore {
             .retain(|x| x.actor != actor);
         Ok(())
     }
+
+    async fn get_actor_key(&self) -> Option<ActorKey> {
+        self.actor_key.lock().expect("actor_key lock poisoned").clone()
+    }
+
+    async fn set_actor_key(&self, key: &ActorKey) -> Result<(), StoreError> {
+        let mut slot = self.actor_key.lock().expect("actor_key lock poisoned");
+        // First writer wins — never rotate a key already published to remotes.
+        if slot.is_none() {
+            *slot = Some(key.clone());
+        }
+        Ok(())
+    }
+
+    async fn list_following(&self) -> Vec<Following> {
+        let f = self.following.lock().expect("following lock poisoned");
+        let mut v: Vec<Following> = f.clone();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.actor.cmp(&a.actor)));
+        v
+    }
+
+    async fn is_following(&self, actor: &str) -> bool {
+        self.following
+            .lock()
+            .expect("following lock poisoned")
+            .iter()
+            .any(|x| x.actor == actor)
+    }
+
+    async fn add_following(&self, following: &Following) -> Result<(), StoreError> {
+        let mut f = self.following.lock().expect("following lock poisoned");
+        match f.iter_mut().find(|x| x.actor == following.actor) {
+            Some(existing) => {
+                if !following.inbox_url.is_empty() {
+                    existing.inbox_url = following.inbox_url.clone();
+                }
+            }
+            None => f.push(following.clone()),
+        }
+        Ok(())
+    }
+
+    async fn list_home_notes(&self) -> Vec<HomeNote> {
+        let h = self.home_notes.lock().expect("home_notes lock poisoned");
+        let mut v: Vec<HomeNote> = h.clone();
+        v.sort_by(|a, b| b.received_at.cmp(&a.received_at).then_with(|| b.id.cmp(&a.id)));
+        v.truncate(LIST_LIMIT);
+        v
+    }
+
+    async fn add_home_note(&self, note: &HomeNote) -> Result<(), StoreError> {
+        let mut h = self.home_notes.lock().expect("home_notes lock poisoned");
+        // Dedupe on the remote object id — a re-delivery is silently dropped.
+        if h.iter().any(|n| n.id == note.id) {
+            return Ok(());
+        }
+        h.push(note.clone());
+        Ok(())
+    }
 }
 
 // --------------------------------------------------------------------------------------
@@ -265,6 +383,43 @@ impl PgStore {
         )
         .execute(&self.pool)
         .await?;
+        // The single actor's RSA keypair (id is always 'actor' — one row, upserted once).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS actor_keys (\
+                 id TEXT PRIMARY KEY, \
+                 private_pem TEXT NOT NULL, \
+                 public_pem TEXT NOT NULL, \
+                 created_at BIGINT NOT NULL\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Remote actors WE follow (mirror of `followers`).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS following (\
+                 actor TEXT PRIMARY KEY, \
+                 inbox_url TEXT NOT NULL DEFAULT '', \
+                 created_at BIGINT NOT NULL\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Home timeline: notes delivered by remotes we follow.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS home_notes (\
+                 id TEXT PRIMARY KEY, \
+                 actor TEXT NOT NULL, \
+                 content TEXT NOT NULL, \
+                 url TEXT NOT NULL DEFAULT '', \
+                 published BIGINT NOT NULL DEFAULT 0, \
+                 received_at BIGINT NOT NULL\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_home_notes_received_at ON home_notes (received_at)")
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -407,6 +562,116 @@ impl PgStore {
             .await?;
         Ok(())
     }
+
+    async fn get_actor_key_async(&self) -> Result<Option<ActorKey>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT private_pem, public_pem, created_at FROM actor_keys WHERE id = 'actor'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(ActorKey {
+                private_pem: r.try_get("private_pem")?,
+                public_pem: r.try_get("public_pem")?,
+                created_at: r.try_get("created_at")?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn set_actor_key_async(&self, key: &ActorKey) -> Result<(), sqlx::Error> {
+        // First writer wins: DO NOTHING keeps the already-published key stable across restarts /
+        // a concurrent bootstrap race.
+        sqlx::query(
+            "INSERT INTO actor_keys (id, private_pem, public_pem, created_at) \
+             VALUES ('actor', $1, $2, $3) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&key.private_pem)
+        .bind(&key.public_pem)
+        .bind(key.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_following_async(&self) -> Result<Vec<Following>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT actor, inbox_url, created_at FROM following \
+             ORDER BY created_at DESC, actor DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(Following {
+                    actor: r.try_get("actor")?,
+                    inbox_url: r.try_get("inbox_url")?,
+                    created_at: r.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn is_following_async(&self, actor: &str) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query("SELECT 1 AS one FROM following WHERE actor = $1")
+            .bind(actor)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    async fn add_following_async(&self, f: &Following) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO following (actor, inbox_url, created_at) VALUES ($1, $2, $3) \
+             ON CONFLICT (actor) DO UPDATE SET inbox_url = \
+                 CASE WHEN EXCLUDED.inbox_url <> '' THEN EXCLUDED.inbox_url \
+                      ELSE following.inbox_url END",
+        )
+        .bind(&f.actor)
+        .bind(&f.inbox_url)
+        .bind(f.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_home_notes_async(&self) -> Result<Vec<HomeNote>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, actor, content, url, published, received_at FROM home_notes \
+             ORDER BY received_at DESC, id DESC LIMIT $1",
+        )
+        .bind(LIST_LIMIT as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(HomeNote {
+                    id: r.try_get("id")?,
+                    actor: r.try_get("actor")?,
+                    content: r.try_get("content")?,
+                    url: r.try_get("url")?,
+                    published: r.try_get("published")?,
+                    received_at: r.try_get("received_at")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn add_home_note_async(&self, n: &HomeNote) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO home_notes (id, actor, content, url, published, received_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&n.id)
+        .bind(&n.actor)
+        .bind(&n.content)
+        .bind(&n.url)
+        .bind(n.published)
+        .bind(n.received_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 /// True when a sqlx error is a UNIQUE/PK violation (Postgres SQLSTATE 23505).
@@ -487,6 +752,52 @@ impl Store for PgStore {
 
     async fn remove_follower(&self, actor: &str) -> Result<(), StoreError> {
         self.remove_follower_async(actor)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn get_actor_key(&self) -> Option<ActorKey> {
+        self.get_actor_key_async().await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg get_actor_key failed");
+            None
+        })
+    }
+
+    async fn set_actor_key(&self, key: &ActorKey) -> Result<(), StoreError> {
+        self.set_actor_key_async(key)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_following(&self) -> Vec<Following> {
+        self.list_following_async().await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg list_following failed");
+            Vec::new()
+        })
+    }
+
+    async fn is_following(&self, actor: &str) -> bool {
+        self.is_following_async(actor).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg is_following failed");
+            false
+        })
+    }
+
+    async fn add_following(&self, following: &Following) -> Result<(), StoreError> {
+        self.add_following_async(following)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_home_notes(&self) -> Vec<HomeNote> {
+        self.list_home_notes_async().await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg list_home_notes failed");
+            Vec::new()
+        })
+    }
+
+    async fn add_home_note(&self, note: &HomeNote) -> Result<(), StoreError> {
+        self.add_home_note_async(note)
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
