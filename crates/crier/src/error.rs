@@ -18,6 +18,10 @@ pub enum AppError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// Authenticated, but not authorized for this action (e.g. not an admin).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     /// No such note / actor.
     #[error("not_found: {0}")]
     NotFound(String),
@@ -32,6 +36,7 @@ impl AppError {
         match self {
             AppError::InvalidRequest(d) => (StatusCode::BAD_REQUEST, d.clone(), false),
             AppError::Unauthorized(d) => (StatusCode::UNAUTHORIZED, d.clone(), true),
+            AppError::Forbidden(d) => (StatusCode::FORBIDDEN, d.clone(), false),
             AppError::NotFound(d) => (StatusCode::NOT_FOUND, d.clone(), false),
             AppError::Internal(d) => (StatusCode::INTERNAL_SERVER_ERROR, d.clone(), false),
         }

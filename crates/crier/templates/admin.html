@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Admin · Crier · HOLDFAST</title>
+  <style>{{CSS}}</style>
+</head>
+<body class="page-reading">
+{{TOPBAR}}
+<main class="reader">
+  <div class="profile">
+    <h1 class="profile__name">Admin</h1>
+    <p class="profile__summary">Block remote domains or actors, prune followers, and remove any note.</p>
+  </div>
+
+  <section class="card">
+    <div class="card__body">
+      <h2>Blocklist</h2>
+      <form method="post" action="/admin/block">
+        <input type="hidden" name="csrf_token" value="{{CSRF}}">
+        <div class="field">
+          <label for="block-target">Block a domain or actor</label>
+          <input id="block-target" name="target" class="composer__body" placeholder="mastodon.social  ·  or  ·  https://mastodon.social/users/foo" required>
+        </div>
+        <div class="composer__actions">
+          <select name="kind" class="btn btn-ghost btn-sm" aria-label="Block kind">
+            <option value="domain">Domain</option>
+            <option value="actor">Actor id</option>
+          </select>
+          <button class="btn btn-danger" type="submit">Block</button>
+        </div>
+      </form>
+      <ul class="list">
+        {{BLOCKS}}
+      </ul>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card__body">
+      <h2>Followers</h2>
+      <ul class="list">
+        {{FOLLOWERS}}
+      </ul>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card__body">
+      <h2>Notes</h2>
+      <ul class="list">
+        {{NOTES}}
+      </ul>
+    </div>
+  </section>
+</main>
+</body>
+</html>

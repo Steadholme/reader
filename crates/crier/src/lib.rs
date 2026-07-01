@@ -75,6 +75,12 @@ pub fn app(state: AppState) -> Router {
         .route("/api/notes/{id}/edit", post(handlers::web::edit_note))
         .route("/api/notes/{id}/delete", post(handlers::web::delete_note))
         .route("/api/follow", post(handlers::web::follow_remote))
+        // --- SSO admin surface (gated on admin group membership; non-admins get 403) ---
+        .route("/admin", get(handlers::admin::panel))
+        .route("/admin/block", post(handlers::admin::add_block))
+        .route("/admin/unblock", post(handlers::admin::remove_block))
+        .route("/admin/followers/remove", post(handlers::admin::remove_follower))
+        .route("/admin/notes/delete", post(handlers::admin::delete_note))
         // --- public ActivityPub + WebFinger surface ---
         .route("/.well-known/webfinger", get(handlers::ap::webfinger))
         .route("/users/{name}", get(handlers::ap::actor))

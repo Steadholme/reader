@@ -53,6 +53,46 @@ pub fn require_author(headers: &HeaderMap) -> Result<(String, String), AppError>
     Ok((sub, email))
 }
 
+/// Group names that authorize the admin panel. Membership in ANY of these opens `/admin`.
+pub const ADMIN_GROUPS: &[&str] = &["admins", "infra-admins"];
+
+/// The authenticated user's groups, parsed from the comma-separated `X-Auth-Groups` header
+/// (injected AND HMAC-verified by the gateway, so it is trustworthy). Empty when absent/blank.
+pub fn author_groups(headers: &HeaderMap) -> Vec<String> {
+    header_value(headers, HEADER_GROUPS)
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the authenticated user belongs to `group` (exact match against `X-Auth-Groups`).
+pub fn has_group(headers: &HeaderMap, group: &str) -> bool {
+    author_groups(headers).iter().any(|g| g == group)
+}
+
+/// Whether the authenticated user is in ANY [`ADMIN_GROUPS`] entry.
+pub fn is_admin(headers: &HeaderMap) -> bool {
+    let groups = author_groups(headers);
+    ADMIN_GROUPS.iter().any(|a| groups.iter().any(|g| g == a))
+}
+
+/// Require admin group membership for an `/admin` action. `Forbidden` (403) when the authenticated
+/// user carries no admin group — ordinary signed-in users get 403; only admins see the panel.
+pub fn require_admin(headers: &HeaderMap) -> Result<(), AppError> {
+    if is_admin(headers) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "admin panel requires an admin group".to_string(),
+        ))
+    }
+}
+
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
@@ -250,6 +290,38 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(HEADER_SUBJECT, "user-42".parse().unwrap());
         assert!(gateway_identity_ok(&h));
+    }
+
+    #[test]
+    fn has_group_and_require_admin() {
+        // no X-Auth-Groups -> no groups, not an admin, require_admin rejects.
+        let mut none = HeaderMap::new();
+        none.insert(HEADER_SUBJECT, "u_eve".parse().unwrap());
+        assert!(author_groups(&none).is_empty());
+        assert!(!has_group(&none, "admins"));
+        assert!(!is_admin(&none));
+        assert!(require_admin(&none).is_err());
+
+        // comma-separated groups, with whitespace, parse and match by exact name.
+        let mut admins = HeaderMap::new();
+        admins.insert(HEADER_GROUPS, "dev, infra-admins ,x".parse().unwrap());
+        assert!(has_group(&admins, "infra-admins"));
+        assert!(has_group(&admins, "dev"));
+        assert!(!has_group(&admins, "admins"));
+        assert!(is_admin(&admins), "infra-admins authorizes the panel");
+        assert!(require_admin(&admins).is_ok());
+
+        // the `admins` group alone also authorizes.
+        let mut a2 = HeaderMap::new();
+        a2.insert(HEADER_GROUPS, "admins".parse().unwrap());
+        assert!(is_admin(&a2));
+        assert!(require_admin(&a2).is_ok());
+
+        // a non-admin group alone does not authorize.
+        let mut other = HeaderMap::new();
+        other.insert(HEADER_GROUPS, "readers,writers".parse().unwrap());
+        assert!(!is_admin(&other));
+        assert!(require_admin(&other).is_err());
     }
 
     #[test]

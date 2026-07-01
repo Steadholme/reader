@@ -152,6 +152,15 @@ async fn handle_inbox(state: AppState, target: String, headers: HeaderMap, body:
     };
     let kind = activity.get("type").and_then(Value::as_str).unwrap_or("");
 
+    // Admin blocklist gate: a blocked actor id (or any actor on a blocked domain) is rejected at
+    // the inbox — it cannot follow us and cannot deliver a note. Checked before any side effect.
+    if let Some(sender) = actor_id(&activity) {
+        if state.store.is_blocked(&sender).await {
+            tracing::info!(%sender, "inbox rejected — sender is blocklisted");
+            return plain(StatusCode::FORBIDDEN, "sender is blocked");
+        }
+    }
+
     match kind {
         "Follow" => {
             let Some(follower) = actor_id(&activity) else {

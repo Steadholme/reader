@@ -42,6 +42,33 @@ pub struct Follower {
     pub created_at: i64,
 }
 
+/// A blocklist entry — a remote DOMAIN or a single remote actor id rejected at the inbox (maps 1:1
+/// to a `blocklist` row). A blocked sender cannot follow us and cannot deliver to the inbox.
+#[derive(Clone, Debug)]
+pub struct Blocked {
+    /// The blocked value: a bare host (`kind == "domain"`) or an actor id URL (`kind == "actor"`).
+    /// This is the PRIMARY KEY.
+    pub target: String,
+    /// `"domain"` (matches any actor on that host) or `"actor"` (matches one exact actor id).
+    pub kind: String,
+    pub created_at: i64,
+}
+
+/// The host component of an actor id URL, lower-cased (`https://mastodon.social/users/foo` ->
+/// `mastodon.social`). Port + userinfo are stripped. Returns `""` when no host can be derived, and
+/// echoes a bare non-URL input as-is (already a host) so a `domain` block matches either form.
+pub fn actor_domain(actor: &str) -> String {
+    let rest = actor
+        .strip_prefix("https://")
+        .or_else(|| actor.strip_prefix("http://"))
+        .unwrap_or(actor);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Drop any `userinfo@` prefix, then any `:port` suffix.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    host.to_ascii_lowercase()
+}
+
 /// The single actor's persisted RSA keypair (maps 1:1 to the one `actor_keys` row). Kept in the
 /// store so a restart re-publishes the SAME `publicKeyPem` remotes have already cached.
 #[derive(Clone, Debug)]
@@ -115,6 +142,9 @@ pub trait Store: Send + Sync {
     /// Owner-scoped delete of a note. Returns `Ok(true)` when a note with this id owned by
     /// `author_sub` was deleted, `Ok(false)` when no such owned note exists.
     async fn delete_note(&self, id: &str, author_sub: &str) -> Result<bool, StoreError>;
+    /// Admin delete of ANY note regardless of author. Returns `Ok(true)` when a note with this id
+    /// existed and was deleted, `Ok(false)` when there was no such note.
+    async fn admin_delete_note(&self, id: &str) -> Result<bool, StoreError>;
 
     /// All followers, newest-first.
     async fn list_followers(&self) -> Vec<Follower>;
@@ -123,8 +153,18 @@ pub trait Store: Send + Sync {
     /// Record/refresh a follower. Idempotent: re-following updates the inbox URL only when the new
     /// one is non-empty (so a later bare re-Follow never erases a resolved inbox).
     async fn add_follower(&self, follower: &Follower) -> Result<(), StoreError>;
-    /// Remove a follower by actor id (an `Undo` of a `Follow`).
+    /// Remove a follower by actor id (an `Undo` of a `Follow`, or an admin removal).
     async fn remove_follower(&self, actor: &str) -> Result<(), StoreError>;
+
+    /// All blocklist entries, newest-first.
+    async fn list_blocks(&self) -> Vec<Blocked>;
+    /// Add/refresh a blocklist entry. Idempotent on the target (re-blocking is a no-op).
+    async fn add_block(&self, block: &Blocked) -> Result<(), StoreError>;
+    /// Remove a blocklist entry by its exact target.
+    async fn remove_block(&self, target: &str) -> Result<(), StoreError>;
+    /// True when `actor` is blocked: either an exact `actor`-kind match on the id, OR a `domain`-kind
+    /// match on the actor's host. Gates the inbox — a blocked sender is rejected and cannot follow.
+    async fn is_blocked(&self, actor: &str) -> bool;
 
     /// The persisted actor keypair, or `None` before it has ever been generated.
     async fn get_actor_key(&self) -> Option<ActorKey>;
@@ -153,6 +193,7 @@ pub trait Store: Send + Sync {
 pub struct InMemoryStore {
     notes: Mutex<Vec<Note>>,
     followers: Mutex<Vec<Follower>>,
+    blocks: Mutex<Vec<Blocked>>,
     actor_key: Mutex<Option<ActorKey>>,
     following: Mutex<Vec<Following>>,
     home_notes: Mutex<Vec<HomeNote>>,
@@ -229,6 +270,13 @@ impl Store for InMemoryStore {
         Ok(notes.len() != before)
     }
 
+    async fn admin_delete_note(&self, id: &str) -> Result<bool, StoreError> {
+        let mut notes = self.notes.lock().expect("notes lock poisoned");
+        let before = notes.len();
+        notes.retain(|n| n.id != id);
+        Ok(notes.len() != before)
+    }
+
     async fn list_followers(&self) -> Vec<Follower> {
         let f = self.followers.lock().expect("followers lock poisoned");
         let mut v: Vec<Follower> = f.clone();
@@ -260,6 +308,43 @@ impl Store for InMemoryStore {
             .expect("followers lock poisoned")
             .retain(|x| x.actor != actor);
         Ok(())
+    }
+
+    async fn list_blocks(&self) -> Vec<Blocked> {
+        let b = self.blocks.lock().expect("blocks lock poisoned");
+        let mut v: Vec<Blocked> = b.clone();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.target.cmp(&a.target)));
+        v
+    }
+
+    async fn add_block(&self, block: &Blocked) -> Result<(), StoreError> {
+        let mut b = self.blocks.lock().expect("blocks lock poisoned");
+        // Idempotent on the target: re-blocking refreshes the kind but never duplicates the row.
+        match b.iter_mut().find(|x| x.target == block.target) {
+            Some(existing) => existing.kind = block.kind.clone(),
+            None => b.push(block.clone()),
+        }
+        Ok(())
+    }
+
+    async fn remove_block(&self, target: &str) -> Result<(), StoreError> {
+        self.blocks
+            .lock()
+            .expect("blocks lock poisoned")
+            .retain(|x| x.target != target);
+        Ok(())
+    }
+
+    async fn is_blocked(&self, actor: &str) -> bool {
+        let domain = actor_domain(actor);
+        self.blocks
+            .lock()
+            .expect("blocks lock poisoned")
+            .iter()
+            .any(|b| {
+                (b.kind == "actor" && b.target == actor)
+                    || (b.kind == "domain" && b.target.eq_ignore_ascii_case(&domain))
+            })
     }
 
     async fn get_actor_key(&self) -> Option<ActorKey> {
@@ -378,6 +463,16 @@ impl PgStore {
             "CREATE TABLE IF NOT EXISTS followers (\
                  actor TEXT PRIMARY KEY, \
                  inbox_url TEXT NOT NULL DEFAULT '', \
+                 created_at BIGINT NOT NULL\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Blocklist: a remote DOMAIN or a single actor id rejected at the inbox.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS blocklist (\
+                 target TEXT PRIMARY KEY, \
+                 kind TEXT NOT NULL, \
                  created_at BIGINT NOT NULL\
              )",
         )
@@ -563,6 +658,67 @@ impl PgStore {
         Ok(())
     }
 
+    async fn admin_delete_note_async(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("DELETE FROM notes WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn list_blocks_async(&self) -> Result<Vec<Blocked>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT target, kind, created_at FROM blocklist \
+             ORDER BY created_at DESC, target DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(Blocked {
+                    target: r.try_get("target")?,
+                    kind: r.try_get("kind")?,
+                    created_at: r.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn add_block_async(&self, b: &Blocked) -> Result<(), sqlx::Error> {
+        // Idempotent on the target: re-blocking refreshes the kind, never duplicates the row.
+        sqlx::query(
+            "INSERT INTO blocklist (target, kind, created_at) VALUES ($1, $2, $3) \
+             ON CONFLICT (target) DO UPDATE SET kind = EXCLUDED.kind",
+        )
+        .bind(&b.target)
+        .bind(&b.kind)
+        .bind(b.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_block_async(&self, target: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM blocklist WHERE target = $1")
+            .bind(target)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn is_blocked_async(&self, actor: &str) -> Result<bool, sqlx::Error> {
+        let domain = actor_domain(actor);
+        let row = sqlx::query(
+            "SELECT 1 AS one FROM blocklist \
+             WHERE (kind = 'actor' AND target = $1) OR (kind = 'domain' AND target = $2) LIMIT 1",
+        )
+        .bind(actor)
+        .bind(&domain)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     async fn get_actor_key_async(&self) -> Result<Option<ActorKey>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT private_pem, public_pem, created_at FROM actor_keys WHERE id = 'actor'",
@@ -730,6 +886,12 @@ impl Store for PgStore {
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    async fn admin_delete_note(&self, id: &str) -> Result<bool, StoreError> {
+        self.admin_delete_note_async(id)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     async fn list_followers(&self) -> Vec<Follower> {
         self.list_followers_async().await.unwrap_or_else(|e| {
             tracing::error!(error = %e, "pg list_followers failed");
@@ -754,6 +916,32 @@ impl Store for PgStore {
         self.remove_follower_async(actor)
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_blocks(&self) -> Vec<Blocked> {
+        self.list_blocks_async().await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg list_blocks failed");
+            Vec::new()
+        })
+    }
+
+    async fn add_block(&self, block: &Blocked) -> Result<(), StoreError> {
+        self.add_block_async(block)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn remove_block(&self, target: &str) -> Result<(), StoreError> {
+        self.remove_block_async(target)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn is_blocked(&self, actor: &str) -> bool {
+        self.is_blocked_async(actor).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg is_blocked failed");
+            false
+        })
     }
 
     async fn get_actor_key(&self) -> Option<ActorKey> {
