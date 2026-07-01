@@ -12,6 +12,7 @@
 
 pub mod feeds;
 pub mod health;
+pub mod reader;
 pub mod river;
 
 use axum::http::{header, StatusCode};

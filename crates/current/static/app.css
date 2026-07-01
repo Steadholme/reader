@@ -295,3 +295,14 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 /* -------------------------------------------------------- empty state */
 .empty__title { margin: 0 0 6px; font-size: 16px; font-weight: 600; color: var(--ink); }
 .empty__sub { margin: 0; color: var(--ink-2); font-size: 13.5px; }
+
+/* -------------------------------------------------------- in-app reader (/read/{id}) */
+.reader { display: block; }
+.reader__head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
+.reader__time { color: var(--ink-3); font-size: 12.5px; }
+.reader__source { margin-left: auto; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent-2); }
+.reader__title { margin: 0 0 18px; font-size: 30px; font-weight: 600; line-height: 1.25; letter-spacing: -.022em; color: var(--ink); }
+.reader__actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 28px; padding: 0 0 20px; border-bottom: 1px solid var(--line); }
+.reader__body { font-size: 17px; line-height: 1.75; color: var(--ink); }
+.reader__p { margin: 0 0 20px; }
+.reader__empty { margin: 0; color: var(--ink-2); font-size: 15px; }

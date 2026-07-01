@@ -291,7 +291,7 @@ fn strip_tags(s: &str) -> String {
 }
 
 /// Decode the common named + numeric HTML entities (so the plain text reads naturally).
-fn decode_entities(s: &str) -> String {
+pub(crate) fn decode_entities(s: &str) -> String {
     let v: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -342,7 +342,7 @@ fn entity_char(ent: &str) -> Option<char> {
     }
 }
 
-fn collapse_ws(s: &str) -> String {
+pub(crate) fn collapse_ws(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_ws = false;
     for c in s.chars() {
@@ -451,6 +451,8 @@ pub async fn fetch_and_store(
             // No date in the feed -> surface as freshly fetched so it still rivers to the top.
             published_at: pi.published.or(Some(now)),
             read: false,
+            // The reader view lazily fills this on first open (feed bodies rarely carry full text).
+            full_text: None,
         };
         if store.upsert_item(&item).await.map_err(|e| e.to_string())? {
             inserted += 1;

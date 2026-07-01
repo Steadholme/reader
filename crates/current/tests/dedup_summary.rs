@@ -32,6 +32,7 @@ fn item(id: &str, feed_id: &str, guid: &str, title: &str, summary: &str) -> Item
         summary: summary.into(),
         published_at: Some(now_secs()),
         read: false,
+        full_text: None,
     }
 }
 

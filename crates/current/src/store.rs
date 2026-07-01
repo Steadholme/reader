@@ -76,6 +76,16 @@ pub trait Store: Send + Sync {
 
     /// Mark every unread item across an owner's feeds read. Returns the number affected.
     async fn mark_all_read(&self, owner_sub: &str) -> Result<u64, StoreError>;
+
+    /// Cache the extracted full readable text on one item, owner-scoped (via its feed). Idempotent
+    /// from the reader's view: it only writes after a successful fetch+extract. Returns `true`
+    /// when a row was updated (the item existed AND was owned).
+    async fn set_item_full_text(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        full_text: &str,
+    ) -> Result<bool, StoreError>;
 }
 
 // --------------------------------------------------------------------------------------
@@ -257,6 +267,32 @@ impl Store for InMemoryStore {
         }
         Ok(n)
     }
+
+    async fn set_item_full_text(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        full_text: &str,
+    ) -> Result<bool, StoreError> {
+        let owned: Vec<String> = {
+            let feeds = self.feeds.lock().expect("feeds lock poisoned");
+            feeds
+                .iter()
+                .filter(|f| f.owner_sub == owner_sub)
+                .map(|f| f.id.clone())
+                .collect()
+        };
+        let mut items = self.items.lock().expect("items lock poisoned");
+        if let Some(i) = items
+            .iter_mut()
+            .find(|i| i.id == id && owned.contains(&i.feed_id))
+        {
+            i.full_text = Some(full_text.to_string());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 // --------------------------------------------------------------------------------------
@@ -273,7 +309,7 @@ use sqlx::Row;
 /// Column list shared by every feed SELECT, so the row decoder stays in lock-step.
 const FEED_COLS: &str = "id, owner_sub, url, title, last_fetched, created_at";
 /// Column list shared by every item SELECT, so the row decoder stays in lock-step.
-const ITEM_COLS: &str = "id, feed_id, guid, title, link, summary, published_at, read";
+const ITEM_COLS: &str = "id, feed_id, guid, title, link, summary, published_at, read, full_text";
 
 /// PostgreSQL-backed [`Store`]. Holds a pooled connection; the async trait methods drive sqlx
 /// natively, so no worker thread is ever blocked on a DB round-trip.
@@ -328,6 +364,11 @@ impl PgStore {
         )
         .execute(&self.pool)
         .await?;
+        // In-app reader cache column. Idempotent ALTER so existing deployments gain it on the next
+        // startup without a destructive migration (portable standard SQL — nullable TEXT).
+        sqlx::query("ALTER TABLE items ADD COLUMN IF NOT EXISTS full_text TEXT")
+            .execute(&self.pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_feeds_owner ON feeds (owner_sub)")
             .execute(&self.pool)
             .await?;
@@ -363,6 +404,7 @@ impl PgStore {
             summary: row.try_get("summary")?,
             published_at: row.try_get("published_at")?,
             read: row.try_get("read")?,
+            full_text: row.try_get("full_text")?,
         })
     }
 }
@@ -463,8 +505,8 @@ impl Store for PgStore {
     async fn upsert_item(&self, item: &Item) -> Result<bool, StoreError> {
         let result = sqlx::query(
             "INSERT INTO items \
-                 (id, feed_id, guid, title, link, summary, published_at, read) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                 (id, feed_id, guid, title, link, summary, published_at, read, full_text) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
              ON CONFLICT (feed_id, guid) DO NOTHING",
         )
         .bind(&item.id)
@@ -475,6 +517,7 @@ impl Store for PgStore {
         .bind(&item.summary)
         .bind(item.published_at)
         .bind(item.read)
+        .bind(&item.full_text)
         .execute(&self.pool)
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -565,6 +608,25 @@ impl Store for PgStore {
         .map_err(|e| StoreError::Backend(e.to_string()))?;
         Ok(result.rows_affected())
     }
+
+    async fn set_item_full_text(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        full_text: &str,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE items SET full_text = $3 \
+             WHERE id = $1 AND feed_id IN (SELECT id FROM feeds WHERE owner_sub = $2)",
+        )
+        .bind(id)
+        .bind(owner_sub)
+        .bind(full_text)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
@@ -592,6 +654,7 @@ mod tests {
             summary: "s".into(),
             published_at: published,
             read: false,
+            full_text: None,
         }
     }
 
@@ -657,6 +720,29 @@ mod tests {
         assert!(s.remove_feed("f1", "u").await.unwrap());
         assert!(s.get_feed("f1").await.unwrap().is_none());
         assert!(s.river("u", 100).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_full_text_is_owner_scoped() {
+        let s = InMemoryStore::new();
+        s.add_feed(&feed("f1", "u", "https://a.com/rss", 1)).await.unwrap();
+        s.upsert_item(&item("i1", "f1", "g1", Some(10))).await.unwrap();
+
+        // A foreign owner cannot write the cache.
+        assert!(!s.set_item_full_text("i1", "intruder", "hax").await.unwrap());
+        assert!(s
+            .get_item_owned("i1", "u")
+            .await
+            .unwrap()
+            .unwrap()
+            .item
+            .full_text
+            .is_none());
+
+        // The owner can, and it round-trips through get_item_owned.
+        assert!(s.set_item_full_text("i1", "u", "the full body").await.unwrap());
+        let cached = s.get_item_owned("i1", "u").await.unwrap().unwrap();
+        assert_eq!(cached.item.full_text.as_deref(), Some("the full body"));
     }
 
     #[tokio::test]

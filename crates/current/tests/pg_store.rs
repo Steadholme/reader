@@ -82,6 +82,7 @@ async fn pg_store_full_integration() {
         summary: "one".into(),
         published_at: Some(now - 50),
         read: false,
+        full_text: None,
     };
     let it2 = Item {
         id: "item_pg_2".into(),
@@ -92,6 +93,7 @@ async fn pg_store_full_integration() {
         summary: "two".into(),
         published_at: Some(now),
         read: false,
+        full_text: None,
     };
     assert!(pg.upsert_item(&it1).await.expect("insert it1"));
     assert!(pg.upsert_item(&it2).await.expect("insert it2"));
@@ -114,6 +116,21 @@ async fn pg_store_full_integration() {
     // --- get_item_owned: ownership-scoped ----------------------------------
     assert!(pg.get_item_owned("item_pg_1", owner).await.expect("owned").is_some());
     assert!(pg.get_item_owned("item_pg_1", "intruder").await.expect("foreign").is_none());
+
+    // --- reader full_text cache: owner-scoped write + round-trip -----------
+    assert!(!pg
+        .set_item_full_text("item_pg_1", "intruder", "hax")
+        .await
+        .expect("foreign full_text"));
+    assert!(pg
+        .set_item_full_text("item_pg_1", owner, "Full body paragraph one.\n\nParagraph two.")
+        .await
+        .expect("set full_text"));
+    let cached = pg.get_item_owned("item_pg_1", owner).await.expect("owned2").unwrap();
+    assert_eq!(
+        cached.item.full_text.as_deref(),
+        Some("Full body paragraph one.\n\nParagraph two.")
+    );
 
     // --- mark all read -----------------------------------------------------
     let n = pg.mark_all_read(owner).await.expect("mark all");
@@ -160,6 +177,7 @@ async fn pg_store_full_integration() {
         summary: "served from postgres".into(),
         published_at: Some(now),
         read: false,
+        full_text: None,
     })
     .await
     .expect("seed http item");

@@ -232,7 +232,8 @@ fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str) -> String 
            <h2 class=\"entry__title\"><a href=\"/i/{id}\">{title}</a></h2>\
            {tldr}{summary}{also}\
            <div class=\"entry__actions\">\
-             <a class=\"btn btn-secondary btn-sm\" href=\"/i/{id}\">Open &#8599;</a>\
+             <a class=\"btn btn-secondary btn-sm\" href=\"/read/{id}\">Read</a>\
+             <a class=\"btn btn-ghost btn-sm\" href=\"/i/{id}\">Open &#8599;</a>\
              <form class=\"inline-form\" method=\"post\" action=\"/i/{id}/read\">\
                <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
                <button class=\"btn btn-ghost btn-sm\" type=\"submit\">Mark read</button>\

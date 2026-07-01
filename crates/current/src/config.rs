@@ -40,6 +40,21 @@ pub const MAX_OPML_OUTLINES: usize = 1000;
 /// Number of sentences in an extractive item summary (the inline TL;DR + the summary API).
 pub const SUMMARY_SENTENCES: usize = 2;
 
+/// In-app reader: at or below this many characters of stored summary, the reader view treats the
+/// item as having "no/short content" and attempts a one-off fetch of the article link to extract
+/// the full readable text (cached thereafter).
+pub const READER_SHORT_CONTENT_CHARS: usize = 400;
+
+/// In-app reader: hard cap on a fetched article body, in bytes (a misbehaving server can't
+/// exhaust memory). Separate from the feed-body cap since article pages are the fetch target.
+pub const MAX_ARTICLE_BYTES: usize = 3 * 1024 * 1024;
+
+/// In-app reader: hard cap on the extracted+cached full text, in characters.
+pub const MAX_FULLTEXT_CHARS: usize = 40_000;
+
+/// In-app reader: maximum HTTP redirects followed (each hop re-validated by the SSRF guard).
+pub const MAX_ARTICLE_REDIRECTS: usize = 5;
+
 /// Cross-source story clustering: overlap-coefficient threshold (0..1) above which two items'
 /// title+summary token sets are treated as the same story.
 pub const CLUSTER_SIMILARITY: f64 = 0.5;

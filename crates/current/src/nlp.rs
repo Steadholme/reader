@@ -230,6 +230,7 @@ mod tests {
                 summary: summary.into(),
                 published_at: Some(0),
                 read: false,
+                full_text: None,
             },
             feed_title: feed_title.into(),
         }

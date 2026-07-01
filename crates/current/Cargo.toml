@@ -20,7 +20,7 @@ axum = "0.8"
 # Async runtime axum runs on. The Store trait is async: handlers `.await` it directly, PgStore
 # uses sqlx natively, and the feed poller is a native-async Tokio task — a worker thread is
 # NEVER blocked (no block_in_place, no sync-over-async bridge).
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
 # Erase the async Store trait methods so `Arc<dyn Store>` stays object-safe (same seam as the
 # rest of the estate).
 async-trait = "0.1"

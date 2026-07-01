@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{{TITLE}} · Current · HOLDFAST</title>
+  <style>{{CSS}}</style>
+</head>
+<body class="page-console">
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="/" aria-label="HOLDFAST Current">
+        <span class="brand__glyph" aria-hidden="true">{{SHIELD}}</span>
+        <span class="brand__word">HOLDFAST</span>
+      </a>
+      <div class="topbar__right">{{USERBOX}}</div>
+    </div>
+  </header>
+
+  <main class="console console--narrow">
+    <article class="reader">
+      <div class="reader__head">
+        <span class="feed-badge">{{FEED}}</span>
+        {{WHEN}}
+        <span class="reader__source">{{SOURCE}}</span>
+      </div>
+      <h1 class="reader__title">{{TITLE}}</h1>
+      <div class="reader__actions">
+        {{SOURCELINK}}
+        <a class="btn btn-ghost btn-sm" href="/">Back to river</a>
+      </div>
+      <div class="reader__body">
+        {{CONTENT}}
+      </div>
+    </article>
+  </main>
+</body>
+</html>

@@ -42,6 +42,10 @@ pub struct Item {
     pub published_at: Option<i64>,
     /// Whether the owner has read/opened this item.
     pub read: bool,
+    /// Cached full readable article text (plain text, newline-separated paragraphs), lazily
+    /// populated by the in-app reader view when it fetches the item link. `None` = not yet
+    /// extracted (the reader falls back to `summary`).
+    pub full_text: Option<String>,
 }
 
 /// One row of the unified river: an unread item plus its feed's display title (the join the

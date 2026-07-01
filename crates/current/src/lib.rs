@@ -10,6 +10,7 @@
 //! - `GET /` — the unified river (newest unread items across all feeds)
 //! - `POST /read-all` — mark all read -> 303 `/` (CSRF)
 //! - `GET /i/{id}` — open: mark read -> 302 to the article link
+//! - `GET /read/{id}` — in-app reader: fetch+extract (SSRF-guarded) + cache full text, mark read
 //! - `POST /i/{id}/read` — mark one read -> 303 `/` (CSRF)
 //! - `GET /api/item/{id}/summary` — extractive 1–2 sentence summary of an item (JSON)
 //! - `GET /feeds` — manage feeds (add form + list)
@@ -18,6 +19,7 @@
 //! - `GET /opml` — export all subscriptions as an OPML document (download)
 //! - `POST /opml` — import subscriptions from a pasted OPML document -> 303 `/feeds` (CSRF)
 
+pub mod article;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -65,6 +67,7 @@ pub fn app(state: AppState) -> Router {
             get(handlers::river::open),
         )
         .route("/i/{id}/read", post(handlers::river::mark_read))
+        .route("/read/{id}", get(handlers::reader::read))
         .route(
             "/api/item/{id}/summary",
             get(handlers::river::item_summary),
