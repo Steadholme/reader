@@ -20,8 +20,8 @@ pub const APP_CSS: &str = include_str!("../../static/app.css");
 /// Cross-subdomain gateway logout (Crier lives at social.w33d.xyz; the IdP is at id.w33d.xyz).
 pub const LOGOUT_URL: &str = "https://sso.w33d.xyz/_gw/auth/logout";
 
-/// The HOLDFAST shield glyph (small, for the app-bar brand lockup).
-pub const SHIELD_SVG: &str = r##"<svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="hf-shield-sm" x1="8" y1="4" x2="40" y2="44" gradientUnits="userSpaceOnUse"><stop stop-color="#818CF8"/><stop offset="1" stop-color="#4F46E5"/></linearGradient></defs><path d="M24 4 8 9.5V22c0 11 7 17.4 16 21.5C33 39.4 40 33 40 22V9.5L24 4Z" fill="url(#hf-shield-sm)"/><rect x="20" y="19" width="8" height="13" rx="1" fill="#fff" fill-opacity="0.92"/><path d="M20 19v-2.5a4 4 0 0 1 8 0V19" stroke="#fff" stroke-width="2" stroke-opacity="0.92" fill="none"/></svg>"##;
+/// The Social app icon (Lucide "at-sign") shown in the app-bar brand tile.
+pub const SHIELD_SVG: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94"/></svg>"##;
 
 /// Minimal HTML escaping for text/attribute interpolation (defense-in-depth on every field).
 pub fn esc(s: &str) -> String {
@@ -38,50 +38,80 @@ pub fn render_note_html(content: &str) -> String {
     esc(content).replace('\n', "<br>")
 }
 
-/// The 3x3 "All apps" grid glyph for the apex-portal back link.
+/// The 3x3 "All apps" grid glyph for the apex-portal back link (also the All-apps menu item).
 const ALLAPPS_SVG: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>"##;
+/// Lucide-style line icons for the app-bar nav + user menu.
+const ICON_USER: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"##;
+const ICON_HOME: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>"##;
+const ICON_CARET: &str = r##"<svg class="usermenu__caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>"##;
+const ICON_LOGOUT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>"##;
 
-/// Render the shared app-bar: shield + HOLDFAST wordmark on the left; the page title, an "All apps"
-/// link back to the apex portal, the signed-in user chip (avatar initial + email), and a Logout link
-/// to the gateway on the right. The user chip is omitted when there is no gateway identity (public /
-/// error chrome) — only the brand + All-apps link remain.
+/// Render the shared app-bar (v2): the at-sign brand tile + Social lockup on the left; the
+/// Profile/Home nav; then an "All apps" waffle back to the apex portal and a CSS focus-within
+/// avatar menu (Account · All apps · Log out). `page_title` selects the active nav item. The
+/// logout route/method are preserved exactly (a GET link to the gateway) as a danger menu item;
+/// with no gateway identity (public/error chrome) the avatar falls back to a neutral glyph.
 pub fn topbar(page_title: &str, email: &str) -> String {
-    let has_identity = !email.is_empty() && email != "—";
-    let chip = if has_identity {
-        let initial = email
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "H".to_string());
-        format!(
-            r#"<span class="userchip"><span class="userchip__avatar" aria-hidden="true">{initial}</span><span class="user-email">{email}</span></span>"#,
-            initial = esc(&initial),
-            email = esc(email),
-        )
-    } else {
-        String::new()
-    };
+    let profile_cls = if page_title == "Home" { "" } else { " is-active" };
+    let home_cls = if page_title == "Home" { " is-active" } else { "" };
+    let ident = if email.is_empty() || email == "—" { "" } else { email };
+    let (initials, name, sub) = identity_bits(ident);
     format!(
-        r#"<header class="topbar">
-  <div class="topbar__inner">
-    <a class="brand" href="/" aria-label="HOLDFAST Crier">
-      <span class="brand__glyph" aria-hidden="true">{shield}</span>
-      <span class="brand__word">HOLDFAST</span>
-    </a>
-    <div class="topbar__right">
-      <span class="topbar__title">{title}</span>
-      <a class="allapps" href="https://w33d.xyz" title="All apps">{allapps}All apps</a>
-      {chip}
-      <a class="btn btn-ghost btn-sm" href="{logout}">Log out</a>
+        r#"<header class="appbar">
+  <a class="appbar__brand" href="/" aria-label="HOLDFAST Social">
+    <span class="app-tile" style="--app:#7c3aed;--app-soft:#f4f0fe" aria-hidden="true">{shield}</span>
+    <span class="appbar__name"><b>Social</b><span>social.w33d.xyz</span></span>
+  </a>
+  <nav class="appbar__nav">
+    <a class="appnav{profile_cls}" href="/">{icon_user}Profile</a>
+    <a class="appnav{home_cls}" href="/home">{icon_home}Home</a>
+  </nav>
+  <span class="appbar__spacer"></span>
+  <div class="appbar__right">
+    <a class="iconbtn" href="https://w33d.xyz" title="All apps" aria-label="All apps">{allapps}</a>
+    <div class="usermenu">
+      <button class="usermenu__btn" type="button" aria-haspopup="true" aria-label="Account menu">
+        <span class="avatar" aria-hidden="true">{initials}</span>
+        <span class="usermenu__name">{name}</span>{icon_caret}</button>
+      <div class="usermenu__pop" role="menu">
+        <div class="usermenu__head"><span class="avatar avatar--lg" aria-hidden="true">{initials}</span><div><b>{name}</b><span>{sub}</span></div></div>
+        <a class="menuitem" href="https://account.w33d.xyz" role="menuitem">{icon_user}Account</a>
+        <a class="menuitem" href="https://w33d.xyz" role="menuitem">{allapps}All apps</a>
+        <a class="menuitem menuitem--danger" href="{logout}" role="menuitem">{icon_logout}Log out</a>
+      </div>
     </div>
   </div>
 </header>"#,
         shield = SHIELD_SVG,
-        title = esc(page_title),
+        profile_cls = profile_cls,
+        home_cls = home_cls,
+        icon_user = ICON_USER,
+        icon_home = ICON_HOME,
+        icon_caret = ICON_CARET,
+        icon_logout = ICON_LOGOUT,
         allapps = ALLAPPS_SVG,
-        chip = chip,
+        initials = esc(&initials),
+        name = esc(&name),
+        sub = esc(&sub),
         logout = LOGOUT_URL,
     )
+}
+
+/// Derive the avatar initials, the primary display name, and a secondary menu line from a
+/// (possibly empty) signed-in email. With no identity we fall back to a neutral glyph so the
+/// chrome always renders.
+fn identity_bits(email: &str) -> (String, String, String) {
+    let e = email.trim();
+    if e.is_empty() {
+        return ("H".to_string(), "Account".to_string(), "Signed in".to_string());
+    }
+    let local = e.split('@').next().unwrap_or(e);
+    let initials = local
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "H".to_string());
+    (initials, e.to_string(), "HOLDFAST SSO".to_string())
 }
 
 /// Format epoch seconds as a compact UTC date `Mon D, YYYY` (e.g. `Jun 29, 2026`). std `time` only.
