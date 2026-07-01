@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>{{TITLE}} · Magpie · HOLDFAST</title>
+  <title>Search · Magpie · HOLDFAST</title>
   <style>{{CSS}}</style>
 </head>
 <body class="page-console">
@@ -18,25 +18,23 @@
     </div>
   </header>
 
-  <main class="console console--reader">
+  <main class="console">
     <div class="console__head console__head--row">
       <a class="btn btn-ghost btn-sm" href="/">&larr; Reading list</a>
-      <div class="reader-actions">
-        <a class="btn btn-ghost btn-sm" href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">Open original</a>
-        {{ARCHIVE}}
-        {{DELETE}}
-      </div>
+      <h1>Search</h1>
     </div>
 
-    <article class="reader">
-      <h1 class="reader-title">{{TITLE}}</h1>
-      <p class="reader-meta">{{META}}</p>
-      <p class="reader-source"><a href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">{{URL_TEXT}}</a></p>
-      {{TAGS}}
-      <div class="reader-body">
-        {{CONTENT}}
-      </div>
-    </article>
+    <section class="reading">
+      <form class="search-bar" method="get" action="/search" role="search">
+        <input class="search-input" type="search" name="q" value="{{QUERY_ATTR}}" inputmode="search"
+               autocomplete="off" placeholder="Search your clips…" aria-label="Search your clips" autofocus>
+        <button class="btn btn-secondary btn-sm" type="submit">Search</button>
+      </form>
+      <ul class="clip-list">
+        {{LIST}}
+      </ul>
+      {{MORE}}
+    </section>
   </main>
 </body>
 </html>

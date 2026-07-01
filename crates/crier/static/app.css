@@ -219,3 +219,11 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 .error-card__code { font-size: 52px; font-weight: 600; color: var(--accent-2); letter-spacing: -.03em; line-height: 1; }
 .error-card__title { margin: 10px 0; font-size: 20px; font-weight: 600; color: var(--ink); }
 .error-card__msg { margin: 0 0 24px; color: var(--ink-2); font-size: 14px; }
+
+/* Owner-only note edit/delete controls (Crier timeline). */
+.note__actions { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; }
+.note__edit { flex: 0 0 auto; }
+.note__edit > summary { list-style: none; cursor: pointer; display: inline-flex; }
+.note__edit > summary::-webkit-details-marker { display: none; }
+.note__editform { margin-top: 12px; min-width: min(100%, 420px); }
+.note__editform .composer__body { min-height: 72px; width: 100%; }

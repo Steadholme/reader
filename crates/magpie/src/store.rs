@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::config::LIST_LIMIT;
-use crate::model::{Clip, Filter};
+use crate::model::{tags_contain, Clip, Cursor, Filter};
 
 /// Storage failure surfaced to the handler layer (mapped to a 500 `server_error`).
 #[derive(Debug, Error)]
@@ -43,6 +43,29 @@ pub trait Store: Send + Sync {
 
     /// An owner's clips for `filter`, newest-first, capped at [`LIST_LIMIT`].
     async fn list(&self, owner_sub: &str, filter: Filter) -> Result<Vec<Clip>, StoreError>;
+
+    /// An owner's NON-archived clips carrying `tag` (whole-token match), newest-first, capped at
+    /// [`LIST_LIMIT`].
+    async fn list_by_tag(&self, owner_sub: &str, tag: &str) -> Result<Vec<Clip>, StoreError>;
+
+    /// Full-text-ish search over an owner's clips (`title` + extracted `content_text`,
+    /// case-insensitive substring), newest-first, keyset-paginated: `before` is the last row of the
+    /// previous page (exclusive) and at most `limit` rows are returned.
+    async fn search(
+        &self,
+        owner_sub: &str,
+        query: &str,
+        before: Option<&Cursor>,
+        limit: usize,
+    ) -> Result<Vec<Clip>, StoreError>;
+
+    /// Replace the tags on an owner's clip (`None` clears them). Returns `true` when a row changed.
+    async fn set_tags(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        tags: Option<String>,
+    ) -> Result<bool, StoreError>;
 
     /// Mark an owner's clip read. Returns `true` when a row was updated.
     async fn mark_read(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
@@ -117,6 +140,70 @@ impl Store for InMemoryStore {
         Ok(out)
     }
 
+    async fn list_by_tag(&self, owner_sub: &str, tag: &str) -> Result<Vec<Clip>, StoreError> {
+        let clips = self.clips.lock().expect("clips lock poisoned");
+        let mut out: Vec<Clip> = clips
+            .iter()
+            .filter(|c| c.owner_sub == owner_sub && !c.archived && tags_contain(&c.tags, tag))
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.id.cmp(&a.id)));
+        out.truncate(LIST_LIMIT);
+        Ok(out)
+    }
+
+    async fn search(
+        &self,
+        owner_sub: &str,
+        query: &str,
+        before: Option<&Cursor>,
+        limit: usize,
+    ) -> Result<Vec<Clip>, StoreError> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let clips = self.clips.lock().expect("clips lock poisoned");
+        let mut out: Vec<Clip> = clips
+            .iter()
+            .filter(|c| {
+                c.owner_sub == owner_sub
+                    && (c.title.to_lowercase().contains(&needle)
+                        || c.content_text.to_lowercase().contains(&needle))
+            })
+            .cloned()
+            .collect();
+        // Newest-first; the same total order the keyset cursor walks.
+        out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.id.cmp(&a.id)));
+        // Keyset: keep only rows strictly AFTER the cursor in that order (exclusive).
+        if let Some(cur) = before {
+            out.retain(|c| {
+                c.saved_at < cur.saved_at || (c.saved_at == cur.saved_at && c.id < cur.id)
+            });
+        }
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn set_tags(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        tags: Option<String>,
+    ) -> Result<bool, StoreError> {
+        let mut clips = self.clips.lock().expect("clips lock poisoned");
+        match clips
+            .iter_mut()
+            .find(|c| c.id == id && c.owner_sub == owner_sub)
+        {
+            Some(c) => {
+                c.tags = tags;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     async fn mark_read(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
         let mut clips = self.clips.lock().expect("clips lock poisoned");
         match clips
@@ -172,7 +259,13 @@ use sqlx::Row;
 
 /// Column list shared by every SELECT, so the row decoder stays in lock-step with the query.
 const COLS: &str =
-    "id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived";
+    "id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived, tags";
+
+/// Escape the LIKE metacharacters (`\`, `%`, `_`) in a user-supplied needle so it matches
+/// literally under `LIKE ... ESCAPE '\'`. Backslash first, so the escapes we add are not re-escaped.
+fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
 
 /// PostgreSQL-backed [`Store`]. Holds a pooled connection; the async trait methods drive sqlx
 /// natively, so no worker thread is ever blocked on a DB round-trip.
@@ -215,6 +308,11 @@ impl PgStore {
         )
         .execute(&self.pool)
         .await?;
+        // Additive, idempotent evolution: the nullable tags column. Portable standard SQL
+        // (`ADD COLUMN IF NOT EXISTS`) — safe to re-run on every boot, no data migration.
+        sqlx::query("ALTER TABLE clips ADD COLUMN IF NOT EXISTS tags TEXT")
+            .execute(&self.pool)
+            .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_clips_owner_saved \
              ON clips (owner_sub, saved_at)",
@@ -243,6 +341,7 @@ impl PgStore {
             saved_at: row.try_get("saved_at")?,
             read: row.try_get("read")?,
             archived: row.try_get("archived")?,
+            tags: row.try_get("tags")?,
         })
     }
 
@@ -251,8 +350,8 @@ impl PgStore {
         // retries with a fresh id. This is the single, race-free insert path.
         let result = sqlx::query(
             "INSERT INTO clips \
-                 (id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+                 (id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived, tags) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(&clip.id)
@@ -265,6 +364,7 @@ impl PgStore {
         .bind(clip.saved_at)
         .bind(clip.read)
         .bind(clip.archived)
+        .bind(&clip.tags)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -310,6 +410,79 @@ impl PgStore {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(Self::clip_from_row).collect()
+    }
+
+    async fn list_by_tag_async(
+        &self,
+        owner_sub: &str,
+        tag: &str,
+    ) -> Result<Vec<Clip>, sqlx::Error> {
+        // Whole-token match against the normalized comma list: wrap both sides in commas so
+        // `,tag,` cannot match a substring of a neighbouring tag. `ESCAPE '\'` neutralizes any
+        // LIKE metacharacters in the token.
+        let pattern = format!("%,{},%", like_escape(&tag.trim().to_lowercase()));
+        let rows = sqlx::query(&format!(
+            "SELECT {COLS} FROM clips \
+             WHERE owner_sub = $1 AND archived = FALSE AND tags IS NOT NULL \
+               AND (',' || LOWER(tags) || ',') LIKE $2 ESCAPE '\\' \
+             ORDER BY saved_at DESC, id DESC LIMIT $3"
+        ))
+        .bind(owner_sub)
+        .bind(pattern)
+        .bind(LIST_LIMIT as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::clip_from_row).collect()
+    }
+
+    async fn search_async(
+        &self,
+        owner_sub: &str,
+        query: &str,
+        before: Option<&Cursor>,
+        limit: usize,
+    ) -> Result<Vec<Clip>, sqlx::Error> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!("%{}%", like_escape(&needle));
+        // Keyset predicate over the (saved_at DESC, id DESC) order: rows strictly after the cursor.
+        // Bound positionally so the same statement runs unchanged on FusionDB over pgwire.
+        let (keyset, has_cursor) = match before {
+            Some(_) => (" AND (saved_at < $3 OR (saved_at = $3 AND id < $4))", true),
+            None => ("", false),
+        };
+        let limit_pos = if has_cursor { "$5" } else { "$3" };
+        let sql = format!(
+            "SELECT {COLS} FROM clips \
+             WHERE owner_sub = $1 \
+               AND (LOWER(title) LIKE $2 ESCAPE '\\' OR LOWER(content_text) LIKE $2 ESCAPE '\\')\
+             {keyset} \
+             ORDER BY saved_at DESC, id DESC LIMIT {limit_pos}"
+        );
+        let mut q = sqlx::query(&sql).bind(owner_sub).bind(pattern);
+        if let Some(cur) = before {
+            q = q.bind(cur.saved_at).bind(&cur.id);
+        }
+        let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
+        rows.iter().map(Self::clip_from_row).collect()
+    }
+
+    async fn set_tags_async(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        tags: Option<String>,
+    ) -> Result<bool, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE clips SET tags = $3 WHERE id = $1 AND owner_sub = $2")
+                .bind(id)
+                .bind(owner_sub)
+                .bind(&tags)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn mark_read_async(&self, id: &str, owner_sub: &str) -> Result<bool, sqlx::Error> {
@@ -378,6 +551,35 @@ impl Store for PgStore {
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    async fn list_by_tag(&self, owner_sub: &str, tag: &str) -> Result<Vec<Clip>, StoreError> {
+        self.list_by_tag_async(owner_sub, tag)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn search(
+        &self,
+        owner_sub: &str,
+        query: &str,
+        before: Option<&Cursor>,
+        limit: usize,
+    ) -> Result<Vec<Clip>, StoreError> {
+        self.search_async(owner_sub, query, before, limit)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn set_tags(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        tags: Option<String>,
+    ) -> Result<bool, StoreError> {
+        self.set_tags_async(id, owner_sub, tags)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     async fn mark_read(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
         self.mark_read_async(id, owner_sub)
             .await
@@ -418,7 +620,14 @@ mod tests {
             saved_at,
             read: false,
             archived: false,
+            tags: None,
         }
+    }
+
+    fn tagged(id: &str, owner: &str, saved_at: i64, tags: &str) -> Clip {
+        let mut c = clip(id, owner, &format!("https://x/{id}"), saved_at);
+        c.tags = crate::model::normalize_tags(tags);
+        c
     }
 
     #[tokio::test]
@@ -456,6 +665,64 @@ mod tests {
         assert!(s.find_by_owner_url("u", "https://x").await.unwrap().is_some());
         assert!(s.find_by_owner_url("u", "https://y").await.unwrap().is_none());
         assert!(s.find_by_owner_url("other", "https://x").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_by_tag_matches_whole_token_and_scopes_owner() {
+        let s = InMemoryStore::new();
+        s.create(&tagged("a", "u", 10, "Rust,web")).await.unwrap();
+        s.create(&tagged("b", "u", 20, "rust,async")).await.unwrap();
+        s.create(&tagged("c", "u", 30, "gardening")).await.unwrap();
+        s.create(&tagged("d", "other", 40, "rust")).await.unwrap();
+        // archived clip with the tag is excluded from the active tag view.
+        s.create(&tagged("e", "u", 50, "rust")).await.unwrap();
+        s.set_archived("e", "u", true).await.unwrap();
+
+        let rust = s.list_by_tag("u", "rust").await.unwrap();
+        assert_eq!(rust.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        // whole-token: "web" must not match "web-dev"-style substrings
+        s.create(&tagged("f", "u", 60, "web-dev")).await.unwrap();
+        let web = s.list_by_tag("u", "web").await.unwrap();
+        assert_eq!(web.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+    }
+
+    #[tokio::test]
+    async fn search_matches_title_and_body_keyset_paginated() {
+        let s = InMemoryStore::new();
+        for (id, saved) in [("a", 10), ("b", 20), ("c", 30)] {
+            let mut c = clip(id, "u", &format!("https://x/{id}"), saved);
+            c.title = format!("Widget {id}");
+            c.content_text = "shared body about widgets".into();
+            s.create(&c).await.unwrap();
+        }
+        // A non-matching clip and another owner's matching clip are excluded.
+        s.create(&clip("z", "u", "https://x/z", 40)).await.unwrap();
+        let mut other = clip("o", "other", "https://x/o", 50);
+        other.content_text = "widgets".into();
+        s.create(&other).await.unwrap();
+
+        // Page 1 (limit 2), newest-first.
+        let p1 = s.search("u", "widget", None, 2).await.unwrap();
+        assert_eq!(p1.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        // Page 2 continues strictly after the cursor.
+        let cur = Cursor { saved_at: p1[1].saved_at, id: p1[1].id.clone() };
+        let p2 = s.search("u", "widget", Some(&cur), 2).await.unwrap();
+        assert_eq!(p2.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        // Case-insensitive, and matches body-only clips.
+        assert_eq!(s.search("u", "WIDGETS", None, 10).await.unwrap().len(), 3);
+        // Empty query returns nothing.
+        assert!(s.search("u", "  ", None, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_tags_is_ownership_scoped() {
+        let s = InMemoryStore::new();
+        s.create(&clip("a", "u", "https://x", 1)).await.unwrap();
+        assert!(!s.set_tags("a", "intruder", Some("rust".into())).await.unwrap());
+        assert!(s.set_tags("a", "u", crate::model::normalize_tags("Rust, Web")).await.unwrap());
+        assert_eq!(s.get("a").await.unwrap().unwrap().tags.as_deref(), Some("rust,web"));
+        assert!(s.set_tags("a", "u", None).await.unwrap());
+        assert!(s.get("a").await.unwrap().unwrap().tags.is_none());
     }
 
     #[tokio::test]

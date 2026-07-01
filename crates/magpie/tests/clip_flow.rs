@@ -299,6 +299,97 @@ async fn unfetchable_url_returns_bad_gateway() {
 }
 
 #[tokio::test]
+async fn tags_on_save_filter_search_and_edit() {
+    let url = "https://example.com/article";
+    let app = app(state_with(StubFetcher::default().with(url, "text/html", ARTICLE)));
+
+    // Save WITH tags on the create form.
+    let home = send(&app, get("/", Some("alice"))).await;
+    let csrf = home.csrf_cookie().unwrap();
+    let saved = send(
+        &app,
+        post_form(
+            "/clip",
+            &[("csrf_token", &csrf), ("url", url), ("tags", "Rust, Reading")],
+            &csrf,
+            Some("alice"),
+        ),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::FOUND);
+
+    // The list shows the tag chips (normalized to lowercase), each linking to its /?tag= view.
+    let list = send(&app, get("/", Some("alice"))).await;
+    assert!(list.body.contains("href=\"/?tag=rust\""));
+    assert!(list.body.contains("href=\"/?tag=reading\""));
+
+    // The tag view returns the clip; a non-matching tag returns the empty state.
+    let tagged = send(&app, get("/?tag=rust", Some("alice"))).await;
+    assert!(tagged.body.contains("Real Article Title"));
+    let empty_tag = send(&app, get("/?tag=nope", Some("alice"))).await;
+    assert!(empty_tag.body.contains("No clips tagged"));
+    // whole-token: "rus" must not match the "rust" tag.
+    let partial = send(&app, get("/?tag=rus", Some("alice"))).await;
+    assert!(partial.body.contains("No clips tagged"));
+
+    // Full-text search over the extracted body text finds it (case-insensitive).
+    let found = send(&app, get("/search?q=READABLE", Some("alice"))).await;
+    assert_eq!(found.status, StatusCode::OK);
+    assert!(found.body.contains("Real Article Title"));
+    // A non-matching query shows the no-results state.
+    let miss = send(&app, get("/search?q=zzznotpresent", Some("alice"))).await;
+    assert!(miss.body.contains("No clips match"));
+    // Search is owner-scoped: bob sees nothing.
+    let bob_search = send(&app, get("/search?q=readable", Some("bob"))).await;
+    assert!(!bob_search.body.contains("Real Article Title"));
+
+    // Find the clip id from the reader link.
+    let id = {
+        let i = list.body.find("/r/").unwrap() + 3;
+        let rest = &list.body[i..];
+        rest[..rest.find('"').unwrap()].to_string()
+    };
+
+    // Edit the tags via POST /tags/{id} (CSRF-checked, ownership-scoped).
+    let reader = send(&app, get(&format!("/r/{id}"), Some("alice"))).await;
+    let csrf2 = reader.csrf_cookie().unwrap();
+    let edited = send(
+        &app,
+        post_form(
+            &format!("/tags/{id}"),
+            &[("csrf_token", &csrf2), ("tags", "gardening")],
+            &csrf2,
+            Some("alice"),
+        ),
+    )
+    .await;
+    assert_eq!(edited.status, StatusCode::FOUND);
+    assert_eq!(edited.location(), format!("/r/{id}"));
+
+    // The old tag view is now empty; the new one has the clip.
+    let old_view = send(&app, get("/?tag=rust", Some("alice"))).await;
+    assert!(old_view.body.contains("No clips tagged"));
+    let new_view = send(&app, get("/?tag=gardening", Some("alice"))).await;
+    assert!(new_view.body.contains("Real Article Title"));
+
+    // A non-owner cannot edit tags: CSRF cookie "x" == token "x" passes double-submit, then the
+    // ownership check rejects with 403 (same as the archive/delete handlers).
+    let bob_edit = send(
+        &app,
+        post_form(
+            &format!("/tags/{id}"),
+            &[("csrf_token", "x"), ("tags", "hacked")],
+            "x",
+            Some("bob"),
+        ),
+    )
+    .await;
+    assert_eq!(bob_edit.status, StatusCode::FORBIDDEN);
+    // And alice's tags are unchanged.
+    assert!(send(&app, get("/?tag=gardening", Some("alice"))).await.body.contains("Real Article Title"));
+}
+
+#[tokio::test]
 async fn clips_are_private_to_owner() {
     let url = "https://example.com/article";
     let app = app(state_with(StubFetcher::default().with(url, "text/html", ARTICLE)));

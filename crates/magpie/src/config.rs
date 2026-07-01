@@ -15,6 +15,15 @@ pub const DEFAULT_PUBLIC_BASE_URL: &str = "https://clip.w33d.xyz";
 /// How many of an owner's clips a reading-list view shows.
 pub const LIST_LIMIT: usize = 200;
 
+/// Default page size for the keyset-paginated search results.
+pub const DEFAULT_PAGE: usize = 25;
+
+/// Hard cap on a caller-requested search page size (`?limit=` is clamped to this).
+pub const MAX_PAGE: usize = 100;
+
+/// Hard cap on a submitted tags string, in characters (before normalization).
+pub const MAX_TAGS_INPUT_CHARS: usize = 400;
+
 /// Hard cap on bytes read from a fetched page (the streaming reader stops here). Keeps a single
 /// clip bounded regardless of the remote `Content-Length`.
 pub const MAX_FETCH_BYTES: usize = 3 * 1024 * 1024;

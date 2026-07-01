@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::activitypub::{accept_activity, create_activity, ACTIVITY_JSON};
+use crate::activitypub::{
+    accept_activity, create_activity, delete_activity, update_activity, ACTIVITY_JSON,
+};
 use crate::config::Config;
 use crate::store::{Follower, Note, Store};
 
@@ -108,6 +110,23 @@ pub async fn accept_follow(
     }
 }
 
+/// Fan one already-built activity out to every follower with a known inbox. Per-follower failures
+/// are logged only and never affect the local action; `label` names the activity for the logs.
+async fn fan_out(client: &reqwest::Client, store: &Arc<dyn Store>, activity: &Value, label: &str) {
+    let followers = store.list_followers().await;
+    for f in followers {
+        if f.inbox_url.is_empty() {
+            continue;
+        }
+        match post_activity(client, &f.inbox_url, activity).await {
+            Ok(()) => tracing::debug!(actor = %f.actor, label, "activity delivered"),
+            Err(e) => {
+                tracing::warn!(actor = %f.actor, error = %e, label, "delivery failed (best-effort)")
+            }
+        }
+    }
+}
+
 /// Fan a freshly-created note out to every follower with a known inbox. Spawned by the compose
 /// handler; per-follower failures are logged only and never affect the local post.
 pub async fn deliver_note(
@@ -116,18 +135,31 @@ pub async fn deliver_note(
     store: Arc<dyn Store>,
     note: Note,
 ) {
-    let followers = store.list_followers().await;
-    if followers.is_empty() {
-        return;
-    }
     let activity = create_activity(&cfg, &note);
-    for f in followers {
-        if f.inbox_url.is_empty() {
-            continue;
-        }
-        match post_activity(&client, &f.inbox_url, &activity).await {
-            Ok(()) => tracing::debug!(actor = %f.actor, "note delivered"),
-            Err(e) => tracing::warn!(actor = %f.actor, error = %e, "note delivery failed (best-effort)"),
-        }
-    }
+    fan_out(&client, &store, &activity, "Create").await;
+}
+
+/// Fan an owner edit out to every follower as an `Update`. Spawned by the edit handler.
+pub async fn deliver_update(
+    client: reqwest::Client,
+    cfg: Arc<Config>,
+    store: Arc<dyn Store>,
+    note: Note,
+) {
+    let stamp = crate::now_nanos().to_string();
+    let activity = update_activity(&cfg, &note, &stamp);
+    fan_out(&client, &store, &activity, "Update").await;
+}
+
+/// Fan an owner delete out to every follower as a `Delete` of a `Tombstone`. Spawned by the delete
+/// handler; takes the note id only, since the row is already gone from the store.
+pub async fn deliver_delete(
+    client: reqwest::Client,
+    cfg: Arc<Config>,
+    store: Arc<dyn Store>,
+    note_id: String,
+) {
+    let stamp = crate::now_nanos().to_string();
+    let activity = delete_activity(&cfg, &note_id, &stamp);
+    fan_out(&client, &store, &activity, "Delete").await;
 }

@@ -66,6 +66,8 @@ pub fn app(state: AppState) -> Router {
         // --- SSO web surface ---
         .route("/", get(handlers::web::index))
         .route("/api/notes", post(handlers::web::create_note))
+        .route("/api/notes/{id}/edit", post(handlers::web::edit_note))
+        .route("/api/notes/{id}/delete", post(handlers::web::delete_note))
         // --- public ActivityPub + WebFinger surface ---
         .route("/.well-known/webfinger", get(handlers::ap::webfinger))
         .route("/users/{name}", get(handlers::ap::actor))

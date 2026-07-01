@@ -33,6 +33,10 @@ pub const MAX_GUID_CHARS: usize = 512;
 /// Hard cap on a submitted feed URL, in characters.
 pub const MAX_URL_CHARS: usize = 2048;
 
+/// Hard cap on the `<outline>` feed URLs parsed out of a single imported OPML body (bounds the
+/// import work regardless of the per-owner feed cap).
+pub const MAX_OPML_OUTLINES: usize = 1000;
+
 /// Number of sentences in an extractive item summary (the inline TL;DR + the summary API).
 pub const SUMMARY_SENTENCES: usize = 2;
 

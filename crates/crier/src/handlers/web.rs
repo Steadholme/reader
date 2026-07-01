@@ -5,7 +5,7 @@
 //! field), and the POST is double-submit CSRF protected. A successful post is audited
 //! (`crier.note.create`) and best-effort fanned out to followers (non-blocking).
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Form;
@@ -33,6 +33,7 @@ pub struct NoteForm {
 /// `GET /` — the timeline: the actor handle, follower count, a composer, and notes newest-first.
 pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let email = auth::display_email(&headers);
+    let viewer = auth::author_sub(&headers).unwrap_or_default();
     let (csrf, set_cookie) = auth::ensure_csrf(&headers);
 
     let notes = state.store.list_notes().await;
@@ -45,7 +46,9 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
         );
     } else {
         for n in &notes {
-            items.push_str(&render_note(n));
+            // Owner-only edit/delete controls: shown only for the viewer's own notes.
+            let owned = !viewer.is_empty() && n.author_sub == viewer;
+            items.push_str(&render_note(n, &csrf, owned));
         }
     }
 
@@ -72,15 +75,7 @@ pub async fn create_note(
     let (sub, _email) = auth::require_author(&headers)?;
     auth::verify_csrf(&headers, &form.csrf_token)?;
 
-    let content = form.content.trim();
-    if content.is_empty() {
-        return Err(AppError::InvalidRequest("note content is required".to_string()));
-    }
-    if content.chars().count() > MAX_CONTENT_CHARS {
-        return Err(AppError::InvalidRequest(format!(
-            "note exceeds {MAX_CONTENT_CHARS} characters"
-        )));
-    }
+    let content = validate_content(&form.content)?;
 
     let now = now_secs();
     let note = Note {
@@ -89,6 +84,7 @@ pub async fn create_note(
         content: content.to_string(),
         visibility: "public".to_string(),
         created_at: now,
+        updated_at: 0,
     };
     state.store.create_note(&note).await?;
     tracing::info!(id = %note.id, "note created");
@@ -112,19 +108,163 @@ pub async fn create_note(
     Ok(redirect("/"))
 }
 
+/// Edit form body for `POST /api/notes/{id}/edit`. Identity is NEVER taken from the form.
+#[derive(Debug, Deserialize)]
+pub struct EditForm {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub csrf_token: String,
+}
+
+/// Bare CSRF-only form body for `POST /api/notes/{id}/delete`.
+#[derive(Debug, Deserialize)]
+pub struct DeleteForm {
+    #[serde(default)]
+    pub csrf_token: String,
+}
+
+/// `POST /api/notes/{id}/edit` — owner-scoped edit of one's own note, then bounce to `/`.
+pub async fn edit_note(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<EditForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+
+    let content = validate_content(&form.content)?;
+
+    let now = now_secs();
+    // Owner-scoped in the store: only a note whose author_sub == sub is touched. A missing note OR
+    // someone else's note both report `false` — surfaced as 404 (never revealing another's note).
+    let updated = state.store.update_note(&id, &sub, content, now).await?;
+    if !updated {
+        return Err(AppError::NotFound("no such note".to_string()));
+    }
+    tracing::info!(id = %id, "note edited");
+
+    state.audit.emit(AuditEvent::info(
+        "crier.note.edit",
+        &sub,
+        &id,
+        &format!("len={}", content.chars().count()),
+    ));
+
+    // Best-effort federation: announce the revision as an Update (spawned; never blocks the edit).
+    if state.config.federate {
+        if let Some(note) = state.store.get_note(&id).await {
+            let client = state.http.clone();
+            let cfg = state.config.clone();
+            let store = state.store.clone();
+            tokio::spawn(federation::deliver_update(client, cfg, store, note));
+        }
+    }
+
+    Ok(redirect("/"))
+}
+
+/// `POST /api/notes/{id}/delete` — owner-scoped delete of one's own note, then bounce to `/`.
+pub async fn delete_note(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<DeleteForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+
+    let deleted = state.store.delete_note(&id, &sub).await?;
+    if !deleted {
+        return Err(AppError::NotFound("no such note".to_string()));
+    }
+    tracing::info!(id = %id, "note deleted");
+
+    // Destructive action -> warning severity. WHO deleted WHICH note — never the body.
+    state
+        .audit
+        .emit(AuditEvent::warning("crier.note.delete", &sub, &id, "deleted"));
+
+    // Best-effort federation: announce a Delete/Tombstone to followers (spawned; never blocks).
+    if state.config.federate {
+        let client = state.http.clone();
+        let cfg = state.config.clone();
+        let store = state.store.clone();
+        tokio::spawn(federation::deliver_delete(client, cfg, store, id));
+    }
+
+    Ok(redirect("/"))
+}
+
+/// Trim + length-validate note content, returning the trimmed slice or an `InvalidRequest`.
+fn validate_content(raw: &str) -> Result<&str, AppError> {
+    let content = raw.trim();
+    if content.is_empty() {
+        return Err(AppError::InvalidRequest("note content is required".to_string()));
+    }
+    if content.chars().count() > MAX_CONTENT_CHARS {
+        return Err(AppError::InvalidRequest(format!(
+            "note exceeds {MAX_CONTENT_CHARS} characters"
+        )));
+    }
+    Ok(content)
+}
+
 // ---------------------------------------------------------------------------
 // Render helpers
 // ---------------------------------------------------------------------------
 
-/// One timeline note card: rendered (escaped) content + a UTC date. Every field is escaped.
-fn render_note(note: &Note) -> String {
+/// One timeline note card: rendered (escaped) content + a UTC date, plus owner-only edit/delete
+/// controls when `owned`. Every interpolated field is escaped.
+fn render_note(note: &Note, csrf: &str, owned: bool) -> String {
+    let edited = if note.updated_at > 0 { " · edited" } else { "" };
+    let controls = if owned {
+        render_controls(note, csrf)
+    } else {
+        String::new()
+    };
     format!(
         r#"<article class="note">
   <div class="note__body">{body}</div>
-  <div class="note__meta">{date}</div>
+  <div class="note__meta">{date}{edited}</div>{controls}
 </article>"#,
         body = render_note_html(&note.content),
         date = esc(&fmt_date(note.created_at)),
+        edited = edited,
+        controls = controls,
+    )
+}
+
+/// Owner-only edit (collapsible inline form) + delete controls for a note. The note id rides the
+/// form `action` (path), the CSRF token a hidden field; the edit textarea is prefilled with the
+/// escaped current content. Both POSTs are double-submit CSRF protected server-side.
+fn render_controls(note: &Note, csrf: &str) -> String {
+    let id = esc(&note.id);
+    let csrf = esc(csrf);
+    format!(
+        r#"
+  <div class="note__actions">
+    <details class="note__edit">
+      <summary class="btn btn-ghost btn-sm">Edit</summary>
+      <form class="note__editform" method="post" action="/api/notes/{id}/edit">
+        <input type="hidden" name="csrf_token" value="{csrf}">
+        <div class="field">
+          <textarea name="content" class="composer__body" maxlength="5000" required>{content}</textarea>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary btn-sm" type="submit">Save</button>
+        </div>
+      </form>
+    </details>
+    <form method="post" action="/api/notes/{id}/delete" onsubmit="return confirm('Delete this note? This will federate a delete to your followers.');">
+      <input type="hidden" name="csrf_token" value="{csrf}">
+      <button class="btn btn-danger btn-sm" type="submit">Delete</button>
+    </form>
+  </div>"#,
+        id = id,
+        csrf = csrf,
+        content = esc(&note.content),
     )
 }
 

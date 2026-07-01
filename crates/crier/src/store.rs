@@ -28,6 +28,8 @@ pub struct Note {
     pub content: String,
     pub visibility: String,
     pub created_at: i64,
+    /// Epoch seconds of the last owner edit, or `0` when the note has never been edited.
+    pub updated_at: i64,
 }
 
 /// A remote actor that follows us (maps 1:1 to a `followers` row).
@@ -62,6 +64,19 @@ pub trait Store: Send + Sync {
     async fn count_notes(&self) -> i64;
     /// Insert a new note. Errors with [`StoreError::Conflict`] if the id is taken.
     async fn create_note(&self, note: &Note) -> Result<(), StoreError>;
+    /// Owner-scoped edit of a note's content (stamping `updated_at`). Returns `Ok(true)` when a note
+    /// with this id owned by `author_sub` was updated, `Ok(false)` when no such owned note exists (a
+    /// missing note OR one belonging to someone else — the caller must NOT distinguish the two).
+    async fn update_note(
+        &self,
+        id: &str,
+        author_sub: &str,
+        content: &str,
+        updated_at: i64,
+    ) -> Result<bool, StoreError>;
+    /// Owner-scoped delete of a note. Returns `Ok(true)` when a note with this id owned by
+    /// `author_sub` was deleted, `Ok(false)` when no such owned note exists.
+    async fn delete_note(&self, id: &str, author_sub: &str) -> Result<bool, StoreError>;
 
     /// All followers, newest-first.
     async fn list_followers(&self) -> Vec<Follower>;
@@ -128,6 +143,31 @@ impl Store for InMemoryStore {
         }
         notes.push(note.clone());
         Ok(())
+    }
+
+    async fn update_note(
+        &self,
+        id: &str,
+        author_sub: &str,
+        content: &str,
+        updated_at: i64,
+    ) -> Result<bool, StoreError> {
+        let mut notes = self.notes.lock().expect("notes lock poisoned");
+        match notes.iter_mut().find(|n| n.id == id && n.author_sub == author_sub) {
+            Some(n) => {
+                n.content = content.to_string();
+                n.updated_at = updated_at;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn delete_note(&self, id: &str, author_sub: &str) -> Result<bool, StoreError> {
+        let mut notes = self.notes.lock().expect("notes lock poisoned");
+        let before = notes.len();
+        notes.retain(|n| !(n.id == id && n.author_sub == author_sub));
+        Ok(notes.len() != before)
     }
 
     async fn list_followers(&self) -> Vec<Follower> {
@@ -203,11 +243,16 @@ impl PgStore {
                  author_sub TEXT NOT NULL, \
                  content TEXT NOT NULL, \
                  visibility TEXT NOT NULL DEFAULT 'public', \
-                 created_at BIGINT NOT NULL\
+                 created_at BIGINT NOT NULL, \
+                 updated_at BIGINT NOT NULL DEFAULT 0\
              )",
         )
         .execute(&self.pool)
         .await?;
+        // Idempotently backfill the edit-timestamp column on pre-existing deployments.
+        sqlx::query("ALTER TABLE notes ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_notes_created_at ON notes (created_at)")
             .execute(&self.pool)
             .await?;
@@ -230,6 +275,7 @@ impl PgStore {
             content: row.try_get("content")?,
             visibility: row.try_get("visibility")?,
             created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
         })
     }
 
@@ -243,7 +289,7 @@ impl PgStore {
 
     async fn list_notes_async(&self) -> Result<Vec<Note>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, author_sub, content, visibility, created_at \
+            "SELECT id, author_sub, content, visibility, created_at, updated_at \
              FROM notes WHERE visibility = 'public' \
              ORDER BY created_at DESC, id DESC LIMIT $1",
         )
@@ -255,7 +301,8 @@ impl PgStore {
 
     async fn get_note_async(&self, id: &str) -> Result<Option<Note>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, author_sub, content, visibility, created_at FROM notes WHERE id = $1",
+            "SELECT id, author_sub, content, visibility, created_at, updated_at \
+             FROM notes WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -275,17 +322,48 @@ impl PgStore {
 
     async fn create_note_async(&self, n: &Note) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO notes (id, author_sub, content, visibility, created_at) \
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO notes (id, author_sub, content, visibility, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&n.id)
         .bind(&n.author_sub)
         .bind(&n.content)
         .bind(&n.visibility)
         .bind(n.created_at)
+        .bind(n.updated_at)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn update_note_async(
+        &self,
+        id: &str,
+        author_sub: &str,
+        content: &str,
+        updated_at: i64,
+    ) -> Result<bool, sqlx::Error> {
+        // Owner-scoped: the WHERE clause enforces authorization in the same statement, so a note
+        // belonging to someone else is untouched and reports as "not found" to the caller.
+        let res = sqlx::query(
+            "UPDATE notes SET content = $1, updated_at = $2 WHERE id = $3 AND author_sub = $4",
+        )
+        .bind(content)
+        .bind(updated_at)
+        .bind(id)
+        .bind(author_sub)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn delete_note_async(&self, id: &str, author_sub: &str) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("DELETE FROM notes WHERE id = $1 AND author_sub = $2")
+            .bind(id)
+            .bind(author_sub)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     async fn list_followers_async(&self) -> Result<Vec<Follower>, sqlx::Error> {
@@ -367,6 +445,24 @@ impl Store for PgStore {
                 StoreError::Backend(e.to_string())
             }
         })
+    }
+
+    async fn update_note(
+        &self,
+        id: &str,
+        author_sub: &str,
+        content: &str,
+        updated_at: i64,
+    ) -> Result<bool, StoreError> {
+        self.update_note_async(id, author_sub, content, updated_at)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn delete_note(&self, id: &str, author_sub: &str) -> Result<bool, StoreError> {
+        self.delete_note_async(id, author_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
     async fn list_followers(&self) -> Vec<Follower> {

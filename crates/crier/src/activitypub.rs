@@ -81,7 +81,7 @@ pub fn actor(cfg: &Config) -> Value {
 /// The ActivityStreams Note object for one stored note (dereferenceable at [`Config::note_url`]).
 pub fn note_object(cfg: &Config, note: &Note) -> Value {
     let url = cfg.note_url(&note.id);
-    json!({
+    let mut obj = json!({
         "id": url,
         "type": "Note",
         "attributedTo": cfg.actor_url(),
@@ -90,7 +90,13 @@ pub fn note_object(cfg: &Config, note: &Note) -> Value {
         "url": url,
         "to": [PUBLIC],
         "cc": [cfg.followers_url()]
-    })
+    });
+    // An edited note advertises its last-edit time (the AS2 `updated` property), so a remote that
+    // already has the note knows this is a revision.
+    if note.updated_at > 0 {
+        obj["updated"] = json!(crate::rfc3339(note.updated_at));
+    }
+    obj
 }
 
 /// The `Create` activity that wraps a note in the outbox / outbound delivery.
@@ -105,6 +111,40 @@ pub fn create_activity(cfg: &Config, note: &Note) -> Value {
         "to": [PUBLIC],
         "cc": [cfg.followers_url()],
         "object": note_object(cfg, note)
+    })
+}
+
+/// The `Update` activity announcing an owner edit of a note. Carries the full (revised) note object
+/// so a remote can replace its stored copy; `stamp` makes the activity id unique per edit.
+pub fn update_activity(cfg: &Config, note: &Note, stamp: &str) -> Value {
+    let url = cfg.note_url(&note.id);
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{url}/updates/{stamp}"),
+        "type": "Update",
+        "actor": cfg.actor_url(),
+        "published": crate::rfc3339(if note.updated_at > 0 { note.updated_at } else { note.created_at }),
+        "to": [PUBLIC],
+        "cc": [cfg.followers_url()],
+        "object": note_object(cfg, note)
+    })
+}
+
+/// The `Delete` activity announcing an owner delete of a note. The object is a `Tombstone` bearing
+/// the (now-gone) note's id; `stamp` makes the activity id unique.
+pub fn delete_activity(cfg: &Config, note_id: &str, stamp: &str) -> Value {
+    let url = cfg.note_url(note_id);
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{url}/deletes/{stamp}"),
+        "type": "Delete",
+        "actor": cfg.actor_url(),
+        "to": [PUBLIC],
+        "cc": [cfg.followers_url()],
+        "object": {
+            "id": url,
+            "type": "Tombstone"
+        }
     })
 }
 
@@ -194,6 +234,7 @@ mod tests {
             content: "hello world".to_string(),
             visibility: "public".to_string(),
             created_at: 1_700_000_000,
+            updated_at: 0,
         };
         let ob = outbox(&c, std::slice::from_ref(&note), 1);
         assert_eq!(ob["type"], "OrderedCollection");

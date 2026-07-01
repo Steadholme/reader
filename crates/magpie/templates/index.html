@@ -26,6 +26,11 @@
 
     <div class="layout">
       <section class="reading">
+        <form class="search-bar" method="get" action="/search" role="search">
+          <input class="search-input" type="search" name="q" inputmode="search" autocomplete="off"
+                 placeholder="Search your clips…" aria-label="Search your clips">
+          <button class="btn btn-secondary btn-sm" type="submit">Search</button>
+        </form>
         <div class="tabs">{{TABS}}</div>
         <ul class="clip-list">
           {{LIST}}
@@ -42,6 +47,11 @@
                 <label for="url">Page URL</label>
                 <input type="url" id="url" name="url" inputmode="url" autocomplete="off"
                        placeholder="https://example.com/article" required>
+              </div>
+              <div class="field">
+                <label for="tags">Tags <span class="field-hint">(optional, comma-separated)</span></label>
+                <input type="text" id="tags" name="tags" autocomplete="off"
+                       placeholder="rust, reading, later">
               </div>
               <div class="actions">
                 <button class="btn btn-primary" type="submit">Save to reading list</button>

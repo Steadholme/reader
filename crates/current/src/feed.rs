@@ -16,7 +16,8 @@ use quick_xml::name::QName;
 use quick_xml::Reader;
 
 use crate::config::{
-    MAX_FEED_BYTES, MAX_GUID_CHARS, MAX_ITEMS_PER_FETCH, MAX_SUMMARY_CHARS, MAX_TITLE_CHARS,
+    MAX_FEED_BYTES, MAX_GUID_CHARS, MAX_ITEMS_PER_FETCH, MAX_OPML_OUTLINES, MAX_SUMMARY_CHARS,
+    MAX_TITLE_CHARS,
 };
 use crate::model::{Feed, Item};
 use crate::store::Store;
@@ -198,6 +199,56 @@ fn parse_date(s: &str) -> Option<i64> {
     }
     if let Ok(dt) = time::OffsetDateTime::parse(s, &Rfc2822) {
         return Some(dt.unix_timestamp());
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// OPML import
+// ---------------------------------------------------------------------------
+
+/// Extract every `xmlUrl` from an OPML document's `<outline>` elements (subscription import).
+/// Order-preserving, bounded by [`MAX_OPML_OUTLINES`], and never panics (a malformed body ends
+/// the parse early, keeping whatever was already read). Values are XML-unescaped and trimmed;
+/// scheme validation + dedup are the caller's job (via [`safe_link`] and the store's uniqueness).
+pub fn parse_opml_urls(xml: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(xml);
+    let mut urls: Vec<String> = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Err(_) | Ok(Event::Eof) => break,
+            // Outlines are usually self-closing (`Empty`) but may carry nested children (`Start`).
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                if local_lower(e.name()) == "outline" {
+                    if let Some(u) = outline_xmlurl(&e) {
+                        urls.push(u);
+                        if urls.len() >= MAX_OPML_OUTLINES {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    urls
+}
+
+/// The `xmlUrl` attribute of an OPML `<outline>` (case-insensitive), trimmed; `None` when absent
+/// or empty (a grouping outline with no feed URL).
+fn outline_xmlurl(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
+    for attr in e.attributes() {
+        let Ok(attr) = attr else { continue };
+        if local_lower(attr.key) == "xmlurl" {
+            if let Ok(val) = attr.unescape_value() {
+                let v = val.trim().to_string();
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
     }
     None
 }
@@ -504,5 +555,35 @@ mod tests {
         let feed = parse_feed("<rss><channel><item><title>broken");
         // Whatever was read is kept; no panic.
         let _ = feed.items.len();
+    }
+
+    #[test]
+    fn parses_opml_xmlurls_in_order() {
+        let opml = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <opml version="2.0">
+          <head><title>Subscriptions</title></head>
+          <body>
+            <outline text="News">
+              <outline type="rss" text="A" xmlUrl="https://a.com/feed.xml"/>
+              <outline type="rss" text="B &amp; co" xmlUrl="https://b.com/atom" htmlUrl="https://b.com"/>
+            </outline>
+            <outline text="Grouping only, no url"/>
+          </body>
+        </opml>"#;
+        let urls = parse_opml_urls(opml);
+        assert_eq!(
+            urls,
+            vec![
+                "https://a.com/feed.xml".to_string(),
+                "https://b.com/atom".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_opml_does_not_panic() {
+        let urls = parse_opml_urls("<opml><body><outline xmlUrl=\"https://a.com/x\"");
+        // Truncated body: whatever was read is kept; no panic.
+        let _ = urls.len();
     }
 }

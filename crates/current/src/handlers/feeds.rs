@@ -6,15 +6,15 @@
 //! waiting for the next poll; a failing fetch is logged, never surfaced as an error.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Form;
 use serde::Deserialize;
 
 use crate::auth::{self, Identity};
 use crate::config::{MAX_FEEDS_PER_OWNER, MAX_URL_CHARS};
 use crate::error::AppError;
-use crate::feed::{fetch_and_store, new_feed_id, safe_link};
+use crate::feed::{fetch_and_store, new_feed_id, parse_opml_urls, safe_link};
 use crate::handlers::{esc, fmt_rel, html_with_csrf, redirect_see_other, userbox, APP_CSS, SHIELD_SVG};
 use crate::model::Feed;
 use crate::{now_secs, AppState};
@@ -86,22 +86,10 @@ pub async fn add(
         .await);
     }
 
-    let feed = Feed {
-        id: new_feed_id(),
-        owner_sub: who.subject.clone(),
-        url: url.clone(),
-        title: url.clone(), // placeholder until the first fetch learns the real <title>
-        last_fetched: None,
-        created_at: now,
-    };
-
-    if !state.store.add_feed(&feed).await? {
+    // Shared insert + best-effort initial fetch (the same path the OPML import reuses).
+    if !subscribe(&state, &who.subject, url, now).await? {
         return Ok(rerender(&state, &who, "You're already subscribed to that feed.").await);
     }
-    tracing::info!(owner = who.subject, url = feed.url, "feed added");
-
-    // Kick off a one-off fetch so items + the real title appear promptly (best effort).
-    spawn_initial_fetch(state.clone(), feed);
 
     Ok(redirect_see_other("/feeds"))
 }
@@ -130,8 +118,151 @@ pub async fn remove(
 }
 
 // ---------------------------------------------------------------------------
+// GET /opml — export all subscriptions as OPML
+// ---------------------------------------------------------------------------
+
+/// `GET /opml` — download the owner's subscriptions as an OPML 2.0 document (one `<outline>` per
+/// feed). Owner-scoped; feed titles + URLs are XML-attribute-escaped.
+pub async fn export_opml(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let who = auth::identity(&headers);
+    let feeds = state.store.list_feeds(&who.subject).await?;
+    let xml = render_opml(&feeds);
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/x-opml; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"current-subscriptions.opml\"",
+            ),
+        ],
+        xml,
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /opml — import subscriptions from a pasted OPML document
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ImportForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    #[serde(default)]
+    pub opml: String,
+}
+
+/// `POST /opml` — CSRF-checked import: parse each `<outline xmlUrl=…>`, subscribe every valid
+/// http(s) URL (reusing the add-feed path so dedup + the initial fetch are identical), and 303 to
+/// `/feeds`. Duplicates (already-subscribed URLs, repeats within the file) are silently skipped;
+/// the per-owner cap still applies.
+pub async fn import_opml(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ImportForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let now = now_secs();
+
+    let urls = parse_opml_urls(&form.opml);
+    if urls.is_empty() {
+        return Ok(rerender(
+            &state,
+            &who,
+            "No feeds found in that OPML. Paste the contents of an exported OPML file and try again.",
+        )
+        .await);
+    }
+
+    // Existing count seeds the per-owner cap; each successful (deduped) insert bumps it.
+    let mut count = state.store.list_feeds(&who.subject).await?.len();
+    let mut added = 0usize;
+    for raw in urls {
+        if count >= MAX_FEEDS_PER_OWNER {
+            break;
+        }
+        let url = raw.trim();
+        if url.is_empty() || url.chars().count() > MAX_URL_CHARS {
+            continue;
+        }
+        let Some(url) = safe_link(url) else { continue };
+        if subscribe(&state, &who.subject, url, now).await? {
+            added += 1;
+            count += 1;
+        }
+    }
+    tracing::info!(owner = who.subject, added, "opml import complete");
+
+    Ok(redirect_see_other("/feeds"))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Insert a subscription for `owner` to an already scheme-validated `url`, then kick off the
+/// best-effort initial fetch. Returns `Ok(true)` when newly inserted, `Ok(false)` on an
+/// `(owner, url)` conflict (dedup). Shared by the single add form and the OPML import.
+async fn subscribe(
+    state: &AppState,
+    owner: &str,
+    url: String,
+    now: i64,
+) -> Result<bool, AppError> {
+    let feed = Feed {
+        id: new_feed_id(),
+        owner_sub: owner.to_string(),
+        url: url.clone(),
+        title: url.clone(), // placeholder until the first fetch learns the real <title>
+        last_fetched: None,
+        created_at: now,
+    };
+    if !state.store.add_feed(&feed).await? {
+        return Ok(false);
+    }
+    tracing::info!(owner = owner, url = feed.url, "feed added");
+    // Kick off a one-off fetch so items + the real title appear promptly (best effort).
+    spawn_initial_fetch(state.clone(), feed);
+    Ok(true)
+}
+
+/// Render the owner's feeds as an OPML 2.0 document (subscription export).
+fn render_opml(feeds: &[Feed]) -> String {
+    let mut body = String::new();
+    for f in feeds {
+        // Only export a feed whose URL is a safe http(s) link (matches what import will accept).
+        let Some(url) = safe_link(&f.url) else { continue };
+        let title = if f.title.trim().is_empty() {
+            f.url.clone()
+        } else {
+            f.title.clone()
+        };
+        body.push_str(&format!(
+            "    <outline type=\"rss\" text=\"{title}\" title=\"{title}\" xmlUrl=\"{url}\"/>\n",
+            title = esc(&title),
+            url = esc(&url),
+        ));
+    }
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <opml version=\"2.0\">\n\
+         \x20 <head><title>Current subscriptions</title></head>\n\
+         \x20 <body>\n\
+         {body}\
+         \x20 </body>\n\
+         </opml>\n",
+        body = body,
+    )
+}
 
 /// Spawn a detached best-effort initial fetch for a freshly-added feed.
 fn spawn_initial_fetch(state: AppState, feed: Feed) {

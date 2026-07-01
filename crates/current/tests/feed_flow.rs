@@ -244,3 +244,98 @@ fn post_owned(uri: &str, body: &str) -> Request<Body> {
         .body(Body::from(body.to_string()))
         .unwrap()
 }
+
+/// Minimal `application/x-www-form-urlencoded` value encoder (enough for the OPML test bodies).
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn opml_export_downloads_subscriptions() {
+    let state = build_dev_state();
+    state.store.add_feed(&feed("f1", OWNER, "https://ex.com/rss")).await.unwrap();
+    state.store.add_feed(&feed("f2", OWNER, "https://other.com/atom")).await.unwrap();
+    // A feed owned by someone else must NOT appear in our export.
+    state.store.add_feed(&feed("f3", "intruder", "https://secret.com/rss")).await.unwrap();
+
+    let (status, body, headers) = call(&state, get("/opml")).await;
+    assert_eq!(status, StatusCode::OK);
+    let ct = headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+    assert!(ct.contains("opml"), "content-type was {ct}");
+    let cd = headers.get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap();
+    assert!(cd.contains("attachment"), "content-disposition was {cd}");
+
+    let xml = String::from_utf8_lossy(&body);
+    assert!(xml.contains("<opml"));
+    assert!(xml.contains("xmlUrl=\"https://ex.com/rss\""));
+    assert!(xml.contains("xmlUrl=\"https://other.com/atom\""));
+    assert!(!xml.contains("secret.com"));
+}
+
+#[tokio::test]
+async fn opml_import_subscribes_and_dedups() {
+    let state = build_dev_state();
+    // Pre-existing subscription to dedup against (use .invalid so the initial fetch fails fast).
+    state.store.add_feed(&feed("f1", OWNER, "https://a.invalid/feed.xml")).await.unwrap();
+
+    let opml = r#"<?xml version="1.0"?><opml version="2.0"><body>
+      <outline type="rss" text="A" xmlUrl="https://a.invalid/feed.xml"/>
+      <outline type="rss" text="B" xmlUrl="https://b.invalid/rss"/>
+      <outline type="rss" text="Bad scheme" xmlUrl="javascript:alert(1)"/>
+      <outline text="grouping only, no url"/>
+    </body></opml>"#;
+    let body = format!("csrf_token=tok&opml={}", urlencode(opml));
+
+    let (status, _, _) = call(&state, post_owned("/opml", &body)).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let feeds = state.store.list_feeds(OWNER).await.unwrap();
+    let urls: Vec<&str> = feeds.iter().map(|f| f.url.as_str()).collect();
+    // a.invalid already existed (deduped, not duplicated); b.invalid newly added; the
+    // javascript: URL and the url-less grouping outline are both skipped.
+    assert_eq!(feeds.len(), 2, "urls were {urls:?}");
+    assert!(urls.contains(&"https://a.invalid/feed.xml"));
+    assert!(urls.contains(&"https://b.invalid/rss"));
+    assert!(!urls.iter().any(|u| u.contains("javascript")));
+}
+
+#[tokio::test]
+async fn opml_import_requires_csrf() {
+    let state = build_dev_state();
+    // No CSRF cookie -> rejected with 400 (no subscriptions created).
+    let req = Request::builder()
+        .method("POST")
+        .uri("/opml")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("x-auth-subject", OWNER)
+        .header("x-auth-email", EMAIL)
+        .body(Body::from(
+            "csrf_token=tok&opml=%3Copml%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fopml%3E",
+        ))
+        .unwrap();
+    let (status, _, _) = call(&state, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(state.store.list_feeds(OWNER).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn opml_import_empty_rerenders_error() {
+    let state = build_dev_state();
+    // A well-formed but feed-less OPML -> 400 with an inline message, nothing subscribed.
+    let opml = r#"<opml version="2.0"><body><outline text="folder"/></body></opml>"#;
+    let body = format!("csrf_token=tok&opml={}", urlencode(opml));
+    let (status, body, _) = call(&state, post_owned("/opml", &body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(String::from_utf8_lossy(&body).contains("No feeds found"));
+    assert!(state.store.list_feeds(OWNER).await.unwrap().is_empty());
+}

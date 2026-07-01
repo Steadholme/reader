@@ -110,6 +110,111 @@ async fn full_microblog_and_activitypub_flow() {
     assert_eq!(obj["type"], "Note");
     assert_eq!(obj["@context"], "https://www.w3.org/ns/activitystreams");
 
+    // The note's bare id (last path segment) is what the /api/notes/{id} routes take; the
+    // /users/... URL is only for dereferencing the Note object.
+    let raw_id = note_id.rsplit('/').next().unwrap().to_string();
+    let deref_path = note_id.strip_prefix("https://social.w33d.xyz").unwrap();
+
+    // --- edit guards: a different subject cannot edit -> 404 ---------------
+    let edit_form = "content=edited+by+stranger&csrf_token=".to_string() + CSRF;
+    let (status, _, _) = call(
+        &state,
+        post_csrf(&format!("/api/notes/{raw_id}/edit"), &edit_form, Some(("u_intruder", "x@hf"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "non-owner edit -> 404");
+    // The intruder's attempt left the content untouched.
+    let (_, _, body) = call(&state, get(deref_path)).await;
+    let obj: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(obj["content"].as_str().unwrap().contains("hello"), "content unchanged by intruder");
+
+    // bad CSRF on edit -> 401
+    let (status, _, _) = call(
+        &state,
+        post_csrf(
+            &format!("/api/notes/{raw_id}/edit"),
+            "content=x&csrf_token=WRONG",
+            Some(("u_w33d", "w@hf")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "edit CSRF mismatch -> 401");
+
+    // no identity on edit -> 401
+    let (status, _, _) = call(
+        &state,
+        post_csrf(&format!("/api/notes/{raw_id}/edit"), "content=x&csrf_token=", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "edit without identity -> 401");
+
+    // --- owner edits the note ---------------------------------------------
+    let edit_form = "content=hello+again+%3Cb%3Ebold%3C%2Fb%3E&csrf_token=".to_string() + CSRF;
+    let (status, _, _) = call(
+        &state,
+        post_csrf(&format!("/api/notes/{raw_id}/edit"), &edit_form, Some(("u_w33d", "w@hf"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "owner edit -> 303");
+
+    // The Note object now shows the revised (escaped) content + an `updated` timestamp.
+    let (_, _, body) = call(&state, get(deref_path)).await;
+    let obj: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let content = obj["content"].as_str().unwrap();
+    assert!(content.contains("hello again"), "edit reflected");
+    assert!(content.contains("&lt;b&gt;"), "edit content still escaped");
+    assert!(!content.contains("<b>"), "no raw markup survives");
+    assert!(obj["updated"].is_string(), "edited note advertises `updated`");
+
+    // The timeline shows the revised content + an edited marker, still escaped.
+    let (_, _, body) = call(&state, get_auth("/", "u_w33d", "w@hf")).await;
+    assert!(body.contains("hello again"), "timeline shows edit");
+    assert!(body.contains("edited"), "timeline shows edited marker");
+    assert!(!body.contains("<b>bold</b>"), "timeline edit escaped");
+
+    // --- delete guards: a different subject cannot delete -> 404 -----------
+    let del_form = "csrf_token=".to_string() + CSRF;
+    let (status, _, _) = call(
+        &state,
+        post_csrf(&format!("/api/notes/{raw_id}/delete"), &del_form, Some(("u_intruder", "x@hf"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "non-owner delete -> 404");
+    // Still there after the intruder's failed delete.
+    let (status, _, _) = call(&state, get(deref_path)).await;
+    assert_eq!(status, StatusCode::OK, "note survives non-owner delete");
+
+    // bad CSRF on delete -> 401
+    let (status, _, _) = call(
+        &state,
+        post_csrf(&format!("/api/notes/{raw_id}/delete"), "csrf_token=WRONG", Some(("u_w33d", "w@hf"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "delete CSRF mismatch -> 401");
+
+    // --- owner deletes the note -------------------------------------------
+    let (status, _, _) = call(
+        &state,
+        post_csrf(&format!("/api/notes/{raw_id}/delete"), &del_form, Some(("u_w33d", "w@hf"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "owner delete -> 303");
+
+    // The note is gone: dereference -> 404, outbox back to empty.
+    let (status, _, _) = call(&state, get(deref_path)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "deleted note not dereferenceable");
+    let (_, _, body) = call(&state, get("/users/w33d/outbox")).await;
+    let ob: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ob["totalItems"], 0, "outbox empty after delete");
+
+    // Deleting an already-gone note -> 404.
+    let (status, _, _) = call(
+        &state,
+        post_csrf(&format!("/api/notes/{raw_id}/delete"), &del_form, Some(("u_w33d", "w@hf"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "second delete -> 404");
+
     // --- inbox: a Follow registers the follower ----------------------------
     let follow = r#"{"type":"Follow","id":"https://remote.example/activities/1","actor":"https://remote.example/users/alice","object":"https://social.w33d.xyz/users/w33d"}"#;
     let (status, _, _) = call(&state, post_json("/users/w33d/inbox", follow)).await;

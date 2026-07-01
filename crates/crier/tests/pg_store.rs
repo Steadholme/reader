@@ -43,6 +43,7 @@ async fn pg_store_full_integration() {
         content: "from postgres".to_string(),
         visibility: "public".to_string(),
         created_at: now - 100,
+        updated_at: 0,
     };
     pg.create_note(&note).await.expect("create note");
 
@@ -58,6 +59,7 @@ async fn pg_store_full_integration() {
         content: "later".to_string(),
         visibility: "public".to_string(),
         created_at: now,
+        updated_at: 0,
     };
     pg.create_note(&note2).await.expect("create note 2");
 
@@ -66,6 +68,22 @@ async fn pg_store_full_integration() {
     assert_eq!(listed[0].id, "note_pg_2", "newest first");
     assert!(pg.count_notes().await >= 2);
     assert_eq!(pg.get_note("note_pg_1").await.unwrap().content, "from postgres");
+
+    // --- owner-scoped edit + delete ---------------------------------------
+    // Wrong owner -> no-op (false), content untouched.
+    assert!(!pg.update_note("note_pg_1", "u_intruder", "hijacked", now).await.unwrap());
+    assert_eq!(pg.get_note("note_pg_1").await.unwrap().content, "from postgres");
+    // Right owner -> edited, updated_at stamped.
+    assert!(pg.update_note("note_pg_1", "u_w33d", "edited body", now + 5).await.unwrap());
+    let edited = pg.get_note("note_pg_1").await.unwrap();
+    assert_eq!(edited.content, "edited body");
+    assert_eq!(edited.updated_at, now + 5);
+    // Wrong owner delete -> no-op; right owner delete -> gone.
+    assert!(!pg.delete_note("note_pg_1", "u_intruder").await.unwrap());
+    assert!(pg.get_note("note_pg_1").await.is_some());
+    assert!(pg.delete_note("note_pg_1", "u_w33d").await.unwrap());
+    assert!(pg.get_note("note_pg_1").await.is_none());
+    assert!(!pg.delete_note("note_pg_1", "u_w33d").await.unwrap(), "second delete is false");
 
     // --- followers: upsert keeps a resolved inbox --------------------------
     pg.add_follower(&Follower {

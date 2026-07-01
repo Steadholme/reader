@@ -38,6 +38,20 @@
     </section>
 
     <section class="card">
+      <div class="card__head"><h2>Import &amp; export (OPML)</h2></div>
+      <div class="card__body">
+        <p class="sub">Move subscriptions between readers. Export downloads an OPML file; import subscribes to every feed it lists (duplicates are skipped).</p>
+        <a class="btn btn-ghost" href="/opml">Export OPML</a>
+        <form method="post" action="/opml" class="opml-import">
+          <input type="hidden" name="csrf_token" value="{{CSRF}}">
+          <textarea name="opml" class="opml-import__text" rows="6" spellcheck="false"
+                    placeholder="Paste the contents of an exported OPML file here…" required></textarea>
+          <button class="btn btn-primary" type="submit">Import OPML</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card">
       <div class="card__head"><h2>Your subscriptions</h2></div>
       <div class="card__body">
         <ul class="feed-list">

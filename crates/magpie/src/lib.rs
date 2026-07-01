@@ -7,12 +7,14 @@
 //!
 //! Endpoints (served at the subdomain ROOT — Sluice forwards the path unmodified):
 //! - `GET  /healthz` — liveness (public)
-//! - `GET  /` — reading list (filters: all / unread / archived) + save form + bookmarklet
+//! - `GET  /` — reading list (filters: all / unread / archived; `?tag=` view) + save form + bookmarklet
+//! - `GET  /search?q=` — full-text search over title + extracted text (keyset-paginated)
 //! - `GET  /clip?u=` — bookmarklet landing: SSO confirm page that POSTs to `/clip`
-//! - `POST /clip` — fetch the URL, extract, save -> 302 `/` (CSRF-checked)
+//! - `POST /clip` — fetch the URL, extract, save (with optional tags) -> 302 `/` (CSRF-checked)
 //! - `GET  /r/{id}` — clean reader view of the saved text; marks the clip read
 //! - `POST /archive/{id}` — toggle archived -> 302 back (CSRF-checked)
 //! - `POST /delete/{id}` — delete your own clip -> 302 back (CSRF-checked)
+//! - `POST /tags/{id}` — edit your own clip's tags -> 302 `/r/{id}` (CSRF-checked)
 
 pub mod auth;
 pub mod config;
@@ -49,6 +51,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(handlers::health::healthz))
         .route("/", get(handlers::clips::index))
+        .route("/search", get(handlers::clips::search))
         .route(
             "/clip",
             get(handlers::clips::clip_form).post(handlers::clips::clip_create),
@@ -56,6 +59,7 @@ pub fn app(state: AppState) -> Router {
         .route("/r/{id}", get(handlers::clips::reader))
         .route("/archive/{id}", post(handlers::clips::archive))
         .route("/delete/{id}", post(handlers::clips::delete))
+        .route("/tags/{id}", post(handlers::clips::edit_tags))
         // Reject a forged gateway identity (spoofed X-Auth-* from a rogue in-network peer):
         // when GATEWAY_HMAC_KEY is set, an injected identity MUST carry a valid X-Auth-Sig.
         // No-op when the key is unset or no identity is present (health/dev).

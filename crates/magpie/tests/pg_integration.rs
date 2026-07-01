@@ -34,6 +34,7 @@ fn clip(id: &str, owner: &str, url: &str, saved_at: i64) -> Clip {
         saved_at,
         read: false,
         archived: false,
+        tags: None,
     }
 }
 
@@ -112,6 +113,44 @@ async fn pg_store_full_integration() {
         .unwrap();
     let n: i64 = row.try_get("n").unwrap();
     assert_eq!(n, 2, "alice keeps bbbbbb22 + cccccc33 after deleting aaaaaa11");
+
+    // --- tags: set / clear / round-trip + whole-token tag view ---------------
+    // alice now owns bbbbbb22 (saved now+10) and cccccc33 (saved now+20), both non-archived.
+    assert!(store
+        .set_tags("bbbbbb22", "alice", magpie::model::normalize_tags("Rust, Web"))
+        .await
+        .unwrap());
+    assert!(store
+        .set_tags("cccccc33", "alice", magpie::model::normalize_tags("gardening"))
+        .await
+        .unwrap());
+    assert_eq!(
+        store.get("bbbbbb22").await.unwrap().unwrap().tags.as_deref(),
+        Some("rust,web")
+    );
+    let rust = store.list_by_tag("alice", "rust").await.unwrap();
+    assert_eq!(rust.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["bbbbbb22"]);
+    // whole-token: "garden" must not match the "gardening" tag as a substring.
+    assert!(store.list_by_tag("alice", "garden").await.unwrap().is_empty());
+    let gardening = store.list_by_tag("alice", "gardening").await.unwrap();
+    assert_eq!(gardening.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["cccccc33"]);
+    // tag view is owner-scoped: bob's clip never leaks in.
+    assert!(store.list_by_tag("bob", "rust").await.unwrap().is_empty());
+    // clearing tags nulls the column.
+    assert!(store.set_tags("cccccc33", "alice", None).await.unwrap());
+    assert!(store.get("cccccc33").await.unwrap().unwrap().tags.is_none());
+
+    // --- search: LOWER+LIKE over title+content, keyset-paginated -------------
+    // Both bbbbbb22 (now+10) and cccccc33 (now+20) share "second line" in content_text.
+    let p1 = store.search("alice", "SECOND LINE", None, 1).await.unwrap();
+    assert_eq!(p1.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["cccccc33"]);
+    let cur = magpie::model::Cursor { saved_at: p1[0].saved_at, id: p1[0].id.clone() };
+    let p2 = store.search("alice", "second line", Some(&cur), 10).await.unwrap();
+    assert_eq!(p2.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["bbbbbb22"]);
+    // title match + owner scoping: bob's clip is excluded.
+    let by_title = store.search("alice", "title bbbbbb22", None, 10).await.unwrap();
+    assert_eq!(by_title.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["bbbbbb22"]);
+    assert!(store.search("bob", "title bbbbbb22", None, 10).await.unwrap().is_empty());
 
     sqlx::query("DELETE FROM clips").execute(&raw).await.unwrap();
     eprintln!("pg_integration test passed.");

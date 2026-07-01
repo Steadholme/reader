@@ -15,12 +15,12 @@ use axum::Form;
 use serde::Deserialize;
 
 use crate::auth::{self, Identity};
-use crate::config::{MAX_URL_CHARS, MAX_TITLE_CHARS};
+use crate::config::{DEFAULT_PAGE, MAX_PAGE, MAX_TAGS_INPUT_CHARS, MAX_TITLE_CHARS, MAX_URL_CHARS};
 use crate::error::AppError;
 use crate::extract;
 use crate::fetch::parse_http_url;
 use crate::handlers::{bookmarklet_href, esc, fmt_ts, userbox, APP_CSS, SHIELD_SVG};
-use crate::model::{Clip, Filter};
+use crate::model::{normalize_tags, Clip, Cursor, Filter};
 use crate::{now_secs, random_alnum, AppState};
 
 /// Length of the short random clip id (62-symbol alphabet => ~48 bits at 8 chars; the
@@ -30,6 +30,7 @@ const CLIP_ID_LEN: usize = 8;
 const INDEX_HTML: &str = include_str!("../../templates/index.html");
 const SAVE_HTML: &str = include_str!("../../templates/save.html");
 const READER_HTML: &str = include_str!("../../templates/reader.html");
+const SEARCH_HTML: &str = include_str!("../../templates/search.html");
 
 // ---------------------------------------------------------------------------
 // GET / — reading list
@@ -39,24 +40,84 @@ const READER_HTML: &str = include_str!("../../templates/reader.html");
 pub struct IndexQuery {
     #[serde(default)]
     pub filter: String,
+    /// Optional tag filter: `/?tag=rust` shows the owner's non-archived clips carrying that tag.
+    #[serde(default)]
+    pub tag: String,
 }
 
-/// `GET /` — render the reading list for the selected filter, the save form, and the bookmarklet.
+/// `GET /` — render the reading list for the selected filter (or `?tag=`), the save form, and the
+/// bookmarklet.
 pub async fn index(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<IndexQuery>,
 ) -> Response {
     let who = auth::identity(&headers);
-    let filter = Filter::parse(&q.filter);
     let csrf = auth::new_csrf_token();
-    let clips = state
-        .store
-        .list(&who.subject, filter)
-        .await
-        .unwrap_or_default();
 
-    let html = render_index(&state, &who, &csrf, filter, &clips);
+    // `?tag=` is a distinct view over the active list; otherwise the All/Unread/Archived filter.
+    let tag = q.tag.trim();
+    let (filter, tag_view, clips) = if !tag.is_empty() {
+        let clips = state
+            .store
+            .list_by_tag(&who.subject, tag)
+            .await
+            .unwrap_or_default();
+        (Filter::All, Some(tag.to_string()), clips)
+    } else {
+        let filter = Filter::parse(&q.filter);
+        let clips = state
+            .store
+            .list(&who.subject, filter)
+            .await
+            .unwrap_or_default();
+        (filter, None, clips)
+    };
+
+    let html = render_index(&state, &who, &csrf, filter, tag_view.as_deref(), &clips);
+    html_with_csrf(StatusCode::OK, html, &csrf)
+}
+
+// ---------------------------------------------------------------------------
+// GET /search?q= — full-text search over title + extracted text (keyset-paginated)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    #[serde(default)]
+    pub q: String,
+    /// Keyset cursor (`{saved_at}_{id}`) — the last result of the previous page.
+    #[serde(default)]
+    pub before: String,
+    /// Page size, clamped to `[1, MAX_PAGE]`.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /search?q=<terms>` — case-insensitive substring search over the owner's clip titles and
+/// extracted text, newest-first, keyset-paginated via `?before=`.
+pub async fn search(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(sq): Query<SearchQuery>,
+) -> Response {
+    let who = auth::identity(&headers);
+    let csrf = auth::new_csrf_token();
+    let query = sq.q.trim().to_string();
+    let limit = sq.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+    let before = Cursor::parse(&sq.before);
+
+    let results = if query.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .store
+            .search(&who.subject, &query, before.as_ref(), limit)
+            .await
+            .unwrap_or_default()
+    };
+
+    let html = render_search(&who, &csrf, &query, &results, limit);
     html_with_csrf(StatusCode::OK, html, &csrf)
 }
 
@@ -105,6 +166,9 @@ pub struct CreateForm {
     pub csrf_token: String,
     #[serde(default)]
     pub url: String,
+    /// Optional comma-separated tags typed on the save form (normalized before storage).
+    #[serde(default)]
+    pub tags: String,
 }
 
 /// `POST /clip` — validate + fetch the URL, extract the readable text, and store the clip, then
@@ -128,6 +192,9 @@ pub async fn clip_create(
     if url.chars().count() > MAX_URL_CHARS {
         return Err(AppError::BadRequest("That web address is too long.".to_string()));
     }
+    // Owner-supplied tags: bound the raw input, then normalize (lowercase / trim / dedupe / cap).
+    let tags_raw: String = form.tags.chars().take(MAX_TAGS_INPUT_CHARS).collect();
+    let tags = normalize_tags(&tags_raw);
 
     // Fetch the page over HTTPS (SSRF-guarded, redirect-checked, size/time-capped).
     let fetched = state.fetcher.fetch(&url).await?;
@@ -163,6 +230,13 @@ pub async fn clip_create(
                 .set_archived(&existing.id, &who.subject, false)
                 .await?;
         }
+        // Re-clipping with tags updates the existing clip's tags rather than making a duplicate.
+        if tags.is_some() {
+            state
+                .store
+                .set_tags(&existing.id, &who.subject, tags)
+                .await?;
+        }
         return Ok(redirect_found("/"));
     }
 
@@ -177,6 +251,7 @@ pub async fn clip_create(
         saved_at: now,
         read: false,
         archived: false,
+        tags,
     };
 
     // Allocate a unique id: generate, try to insert, retry on the rare collision.
@@ -301,6 +376,53 @@ pub async fn delete(
 }
 
 // ---------------------------------------------------------------------------
+// POST /tags/{id} — edit the tags on your own clip
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct TagsForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    #[serde(default)]
+    pub tags: String,
+}
+
+/// `POST /tags/{id}` — CSRF-checked, ownership-scoped edit of a clip's tags, then 302 back to the
+/// reader. The submitted string is normalized; an empty result clears the tags.
+pub async fn edit_tags(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<TagsForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+
+    // Ownership check up-front so a non-owner gets 403/404 (never a silent no-op).
+    match state.store.get(&id).await? {
+        Some(c) if c.owner_sub == who.subject => {}
+        Some(_) => {
+            return Err(AppError::Forbidden(
+                "You can only manage your own clips.".to_string(),
+            ))
+        }
+        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+    }
+
+    let tags_raw: String = form.tags.chars().take(MAX_TAGS_INPUT_CHARS).collect();
+    state
+        .store
+        .set_tags(&id, &who.subject, normalize_tags(&tags_raw))
+        .await?;
+    tracing::info!(id, owner = who.subject, "clip tags updated");
+    Ok(redirect_found(&format!("/r/{id}")))
+}
+
+// ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
@@ -341,8 +463,18 @@ fn render_index(
     who: &Identity,
     csrf: &str,
     filter: Filter,
+    tag_view: Option<&str>,
     clips: &[Clip],
 ) -> String {
+    // In a `?tag=` view the tabs are replaced by a "Tagged" banner with a clear-filter link.
+    let tabs = match tag_view {
+        Some(tag) => format!(
+            "<div class=\"tag-banner\">Tagged <span class=\"tag-chip tag-chip--active\">{}</span>\
+             <a class=\"tab\" href=\"/\">Clear</a></div>",
+            esc(tag),
+        ),
+        None => render_tabs(filter),
+    };
     INDEX_HTML
         .replace("{{CSS}}", APP_CSS)
         .replace("{{SHIELD}}", SHIELD_SVG)
@@ -352,8 +484,8 @@ fn render_index(
             "{{BOOKMARKLET_HREF}}",
             &esc(&bookmarklet_href(&state.config.public_base_url)),
         )
-        .replace("{{TABS}}", &render_tabs(filter))
-        .replace("{{LIST}}", &render_list(clips, csrf, filter))
+        .replace("{{TABS}}", &tabs)
+        .replace("{{LIST}}", &render_list(clips, csrf, filter, tag_view))
 }
 
 /// The All / Unread / Archived filter tabs.
@@ -373,12 +505,19 @@ fn render_tabs(active: Filter) -> String {
 }
 
 /// The reading-list items (already filtered/ordered by the store).
-fn render_list(clips: &[Clip], csrf: &str, filter: Filter) -> String {
+fn render_list(clips: &[Clip], csrf: &str, filter: Filter, tag_view: Option<&str>) -> String {
     if clips.is_empty() {
-        let msg = match filter {
-            Filter::All => "Your reading list is empty. Save a link to get started.",
-            Filter::Unread => "Nothing unread — you're all caught up.",
-            Filter::Archived => "No archived clips yet.",
+        let owned;
+        let msg = match tag_view {
+            Some(tag) => {
+                owned = format!("No clips tagged \u{201c}{tag}\u{201d}.");
+                owned.as_str()
+            }
+            None => match filter {
+                Filter::All => "Your reading list is empty. Save a link to get started.",
+                Filter::Unread => "Nothing unread — you're all caught up.",
+                Filter::Archived => "No archived clips yet.",
+            },
         };
         return format!("<li class=\"clip-item clip-item--empty\">{}</li>", esc(msg));
     }
@@ -387,6 +526,42 @@ fn render_list(clips: &[Clip], csrf: &str, filter: Filter) -> String {
         .map(|c| render_clip_item(c, csrf, filter))
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// Render a clip's tags as small chips linking to their `/?tag=` view. Empty when the clip has
+/// none. Each tag token is URL-encoded in the href and HTML-escaped in the label.
+fn render_tag_chips(tags: &Option<String>) -> String {
+    let Some(s) = tags else { return String::new() };
+    let chips: Vec<String> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            format!(
+                "<a class=\"tag-chip\" href=\"/?tag={href}\">{label}</a>",
+                href = url_encode(t),
+                label = esc(t),
+            )
+        })
+        .collect();
+    if chips.is_empty() {
+        return String::new();
+    }
+    format!("<div class=\"clip-tags\">{}</div>", chips.join(""))
+}
+
+/// Minimal percent-encoding for a query-string value (RFC 3986 unreserved kept verbatim).
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 fn render_clip_item(c: &Clip, csrf: &str, filter: Filter) -> String {
@@ -406,6 +581,7 @@ fn render_clip_item(c: &Clip, csrf: &str, filter: Filter) -> String {
     } else {
         format!("<p class=\"clip-excerpt\">{}</p>", esc(&c.excerpt))
     };
+    let tags = render_tag_chips(&c.tags);
     let archive_label = if c.archived { "Unarchive" } else { "Archive" };
 
     format!(
@@ -414,6 +590,7 @@ fn render_clip_item(c: &Clip, csrf: &str, filter: Filter) -> String {
              <a class=\"clip-title\" href=\"/r/{id}\">{title}</a>\
              <div class=\"clip-meta\">{status}{site}<span class=\"clip-time\">Saved {saved}</span></div>\
              {excerpt}\
+             {tags}\
            </div>\
            <div class=\"clip-actions\">\
              <a class=\"btn btn-ghost btn-sm\" href=\"{url_attr}\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">Source</a>\
@@ -436,6 +613,7 @@ fn render_clip_item(c: &Clip, csrf: &str, filter: Filter) -> String {
         site = site,
         saved = esc(&fmt_ts(c.saved_at)),
         excerpt = excerpt,
+        tags = tags,
         url_attr = esc(&c.url),
         csrf = esc(csrf),
         filter = filter.as_str(),
@@ -483,7 +661,82 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str) -> String {
         .replace("{{URL_TEXT}}", &esc(&clip.url))
         .replace("{{ARCHIVE}}", &archive_form)
         .replace("{{DELETE}}", &delete_form)
+        .replace("{{TAGS}}", &render_tags_editor(clip, csrf))
         .replace("{{CONTENT}}", &render_content(&clip.content_text))
+}
+
+/// The reader's tags row: the current tag chips plus an inline edit form (comma-separated). The
+/// stored value is pre-filled so a save preserves what is not changed.
+fn render_tags_editor(clip: &Clip, csrf: &str) -> String {
+    let chips = render_tag_chips(&clip.tags);
+    let current = clip.tags.as_deref().unwrap_or("");
+    format!(
+        "<div class=\"reader-tags\">\
+           {chips}\
+           <form class=\"tags-form\" method=\"post\" action=\"/tags/{id}\">\
+             <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+             <input class=\"tags-input\" type=\"text\" name=\"tags\" value=\"{value}\" \
+                    placeholder=\"tags, comma, separated\" autocomplete=\"off\">\
+             <button class=\"btn btn-ghost btn-sm\" type=\"submit\">Save tags</button>\
+           </form>\
+         </div>",
+        chips = chips,
+        id = esc(&clip.id),
+        csrf = esc(csrf),
+        value = esc(current),
+    )
+}
+
+/// Render the search results page: the query box, a result count, the matching clips, and a
+/// keyset "Load more" link when the page came back full.
+fn render_search(
+    who: &Identity,
+    csrf: &str,
+    query: &str,
+    results: &[Clip],
+    limit: usize,
+) -> String {
+    let list = if query.is_empty() {
+        "<li class=\"clip-item clip-item--empty\">Type a word or phrase to search your saved \
+         clips.</li>"
+            .to_string()
+    } else if results.is_empty() {
+        format!(
+            "<li class=\"clip-item clip-item--empty\">No clips match \u{201c}{}\u{201d}.</li>",
+            esc(query)
+        )
+    } else {
+        results
+            .iter()
+            .map(|c| render_clip_item(c, csrf, Filter::All))
+            .collect::<Vec<_>>()
+            .join("")
+    };
+
+    // Keyset "next page": only when the page filled to `limit` (there may be more).
+    let more = match results.last() {
+        Some(last) if results.len() == limit => {
+            let cur = Cursor {
+                saved_at: last.saved_at,
+                id: last.id.clone(),
+            };
+            format!(
+                "<div class=\"search-more\"><a class=\"btn btn-ghost btn-sm\" \
+                 href=\"/search?q={q}&before={before}\">Load more</a></div>",
+                q = url_encode(query),
+                before = url_encode(&cur.encode()),
+            )
+        }
+        _ => String::new(),
+    };
+
+    SEARCH_HTML
+        .replace("{{CSS}}", APP_CSS)
+        .replace("{{SHIELD}}", SHIELD_SVG)
+        .replace("{{USERBOX}}", &userbox("Search", Some(&who.email)))
+        .replace("{{QUERY_ATTR}}", &esc(query))
+        .replace("{{LIST}}", &list)
+        .replace("{{MORE}}", &more)
 }
 
 /// Render the stored plain-text content as escaped paragraphs (one per source line). The remote

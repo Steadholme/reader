@@ -15,6 +15,8 @@
 //! - `GET /feeds` — manage feeds (add form + list)
 //! - `POST /feeds` — add a feed by URL -> 303 `/feeds` (CSRF)
 //! - `POST /feeds/{id}/delete` — remove a feed -> 303 `/feeds` (CSRF)
+//! - `GET /opml` — export all subscriptions as an OPML document (download)
+//! - `POST /opml` — import subscriptions from a pasted OPML document -> 303 `/feeds` (CSRF)
 
 pub mod auth;
 pub mod config;
@@ -72,6 +74,10 @@ pub fn app(state: AppState) -> Router {
             get(handlers::feeds::list).post(handlers::feeds::add),
         )
         .route("/feeds/{id}/delete", post(handlers::feeds::remove))
+        .route(
+            "/opml",
+            get(handlers::feeds::export_opml).post(handlers::feeds::import_opml),
+        )
         // Reject a forged gateway identity (spoofed X-Auth-* from a rogue in-network peer):
         // when GATEWAY_HMAC_KEY is set, an injected identity MUST carry a valid X-Auth-Sig.
         // No-op when the key is unset or no identity is present (health / dev).

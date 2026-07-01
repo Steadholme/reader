@@ -251,6 +251,28 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 .clip-actions { display: flex; flex-direction: column; align-items: stretch; gap: 8px; flex: none; }
 .clip-actions .btn, .clip-actions .inline-form .btn { width: 100%; }
 
+/* ---- Tags ---------------------------------------------------------------- */
+.clip-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.tag-chip {
+  display: inline-block; font-size: 11.5px; font-weight: 550; line-height: 1.6;
+  padding: 1px 9px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent-2); border: 1px solid var(--accent-border);
+}
+.tag-chip:hover { background: var(--surface); color: var(--accent); border-color: var(--accent); }
+.tag-chip--active { background: var(--surface); color: var(--accent); }
+.tag-banner { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink-3); margin-bottom: 4px; }
+.field-hint { font-weight: 400; color: var(--ink-3); }
+
+/* ---- Search -------------------------------------------------------------- */
+.search-bar { display: flex; gap: 8px; margin-bottom: 14px; }
+.search-input { flex: 1 1 auto; }
+.search-more { margin-top: 16px; text-align: center; }
+
+/* ---- Reader tags editor -------------------------------------------------- */
+.reader-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 24px; }
+.tags-form { display: flex; gap: 8px; align-items: center; margin: 0; flex: 1 1 260px; }
+.tags-input { flex: 1 1 auto; min-width: 140px; }
+
 /* ---- Badges -------------------------------------------------------------- */
 .badge--unread { background: var(--accent-soft); color: var(--accent-2); border-color: var(--accent-border); }
 .badge--read { background: var(--ok-soft); color: var(--ok-ink); border-color: var(--ok-border); }
