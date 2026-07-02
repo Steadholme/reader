@@ -38,6 +38,9 @@ pub mod hashtag;
 pub mod httpsig;
 pub mod store;
 
+mod notify;
+pub use notify::KlaxonNotifier;
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -60,6 +63,7 @@ pub struct AppState {
     /// The actor's HTTP-Signature signing identity (RSA private key + published `publicKeyPem`).
     /// Signs every outbound delivery and backs the actor document's `publicKey`.
     pub signer: Arc<httpsig::Signer>,
+    pub klaxon: Option<Arc<KlaxonNotifier>>,
 }
 
 /// Build the router wiring both surfaces onto `state`.
@@ -167,6 +171,7 @@ pub fn build_dev_state() -> AppState {
         http: federation::build_http_client(),
         audit: AuditSink::disabled(),
         signer,
+        klaxon: None,
     }
 }
 
@@ -249,6 +254,7 @@ pub async fn build_state_from_env() -> Result<AppState, String> {
         http: federation::build_http_client(),
         audit,
         signer,
+        klaxon: KlaxonNotifier::from_env().map(Arc::new),
     })
 }
 

@@ -201,7 +201,15 @@ async fn handle_inbox(
                 &state.config.actor_url(),
                 "follow",
             ));
-            notify_known_owners(&state, "follow", &follower, "").await;
+            notify_known_owners(
+                &state,
+                "follow",
+                &follower,
+                "",
+                "",
+                &actor_profile_url(&follower),
+            )
+            .await;
             if state.config.federate {
                 tokio::spawn(federation::accept_follow(
                     state.http.clone(),
@@ -259,8 +267,17 @@ async fn handle_inbox(
                 if let Some(note_uri) = object_id(activity.get("object")) {
                     if let Some(local_id) = local_note_id(&state, &note_uri) {
                         if let Some(note) = state.store.get_note(&local_id).await {
-                            add_notification(&state, &note.author_sub, "boost", &sender, &note_uri)
-                                .await;
+                            let url = local_thread_url(&state, &local_id);
+                            add_notification(
+                                &state,
+                                &note.author_sub,
+                                "boost",
+                                &sender,
+                                &note_uri,
+                                &notification_body_summary(&note.content),
+                                &url,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -317,22 +334,41 @@ async fn notify_for_create(state: &AppState, sender: &str, home: &HomeNote, acti
     let mut notified: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(local_id) = local_note_id(state, &home.in_reply_to) {
         if let Some(note) = state.store.get_note(&local_id).await {
-            add_notification(state, &note.author_sub, "reply", sender, &home.id).await;
+            let url = local_thread_url(state, &local_id);
+            add_notification(
+                state,
+                &note.author_sub,
+                "reply",
+                sender,
+                &home.id,
+                &notification_body_summary(&home.content),
+                &url,
+            )
+            .await;
             notified.insert(note.author_sub);
         }
     }
     if mentions_local_actor(state, activity) {
+        let body = notification_body_summary(&home.content);
+        let url = note_permalink_url(home);
         for owner in state.store.known_owner_subs().await {
             if notified.insert(owner.clone()) {
-                add_notification(state, &owner, "mention", sender, &home.id).await;
+                add_notification(state, &owner, "mention", sender, &home.id, &body, &url).await;
             }
         }
     }
 }
 
-async fn notify_known_owners(state: &AppState, kind: &str, actor: &str, note_uri: &str) {
+async fn notify_known_owners(
+    state: &AppState,
+    kind: &str,
+    actor: &str,
+    note_uri: &str,
+    body: &str,
+    url: &str,
+) {
     for owner in state.store.known_owner_subs().await {
-        add_notification(state, &owner, kind, actor, note_uri).await;
+        add_notification(state, &owner, kind, actor, note_uri, body, url).await;
     }
 }
 
@@ -342,6 +378,8 @@ async fn add_notification(
     kind: &str,
     actor: &str,
     note_uri: &str,
+    body: &str,
+    url: &str,
 ) {
     if owner_sub.is_empty() {
         return;
@@ -365,6 +403,72 @@ async fn add_notification(
         owner_sub,
         kind,
     ));
+    notify_klaxon(state, owner_sub, kind, actor, body, url);
+}
+
+fn notify_klaxon(
+    state: &AppState,
+    owner_sub: &str,
+    kind: &str,
+    actor: &str,
+    body: &str,
+    url: &str,
+) {
+    if owner_sub == actor || actor == state.config.actor_url() {
+        return;
+    }
+    let Some(klaxon) = &state.klaxon else {
+        return;
+    };
+    let title = klaxon_title(kind, actor);
+    klaxon.notify("crier", owner_sub, &title, body, url);
+}
+
+fn klaxon_title(kind: &str, actor: &str) -> String {
+    match kind {
+        "boost" => format!("{actor} 转发了你的帖子"),
+        "follow" => format!("{actor} 关注了你"),
+        "reply" => format!("{actor} 回复了你"),
+        "mention" => format!("{actor} 提到了你"),
+        _ => format!("{actor} 通知了你"),
+    }
+}
+
+fn notification_body_summary(content: &str) -> String {
+    const LIMIT: usize = 180;
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= LIMIT {
+        return compact;
+    }
+    let mut out: String = compact.chars().take(LIMIT - 3).collect();
+    out.push_str("...");
+    out
+}
+
+fn local_thread_url(state: &AppState, local_id: &str) -> String {
+    format!("{}/thread/{}", state.config.base_url(), local_id)
+}
+
+fn note_permalink_url(home: &HomeNote) -> String {
+    if is_http_url(&home.url) {
+        home.url.clone()
+    } else if is_http_url(&home.id) {
+        home.id.clone()
+    } else {
+        String::new()
+    }
+}
+
+fn actor_profile_url(actor: &str) -> String {
+    if is_http_url(actor) {
+        actor.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn is_http_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
 }
 
 fn mentions_local_actor(state: &AppState, activity: &Value) -> bool {
@@ -408,6 +512,34 @@ fn local_note_id(state: &AppState, uri: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty() && !s.contains('/'))
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_body_summary_compacts_and_truncates() {
+        let body = notification_body_summary("hello\n\nworld\tfrom crier");
+        assert_eq!(body, "hello world from crier");
+
+        let long = "a".repeat(200);
+        let body = notification_body_summary(&long);
+        assert_eq!(body.chars().count(), 180);
+        assert!(body.ends_with("..."));
+    }
+
+    #[test]
+    fn klaxon_title_uses_event_shape() {
+        assert_eq!(
+            klaxon_title("boost", "https://remote.example/users/alice"),
+            "https://remote.example/users/alice 转发了你的帖子"
+        );
+        assert_eq!(
+            klaxon_title("follow", "https://remote.example/users/alice"),
+            "https://remote.example/users/alice 关注了你"
+        );
+    }
 }
 
 fn object_id(value: Option<&Value>) -> Option<String> {

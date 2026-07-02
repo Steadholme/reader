@@ -32,6 +32,7 @@ fn state_with(verify_inbox: bool) -> AppState {
         http: federation::build_http_client(),
         audit: AuditSink::disabled(),
         signer,
+        klaxon: None,
     }
 }
 

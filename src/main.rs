@@ -189,6 +189,7 @@ async fn build_social() -> Result<Router, String> {
         http: crier::federation::build_http_client(),
         audit,
         signer,
+        klaxon: crier::KlaxonNotifier::from_env().map(Arc::new),
     };
     Ok(crier::app(state))
 }
