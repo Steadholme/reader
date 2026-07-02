@@ -508,3 +508,25 @@ hr { border:none; border-top:1px solid var(--border); margin:20px 0; }
 .listbar__right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .settingbar { display: flex; align-items: center; gap: 8px; margin: 0; }
 .settingbar__label { font-size: 13px; color: var(--ink-2); }
+
+/* ============================================================================
+ * v2 progressive-enhancement additions (Clips list): toast host, optimistic
+ * card removal, and the bulk-select action bar (live count + sticky when
+ * active + disabled actions when nothing is selected). Motion is 140-160ms and
+ * fully disabled under prefers-reduced-motion by the global rule above.
+ * ========================================================================== */
+.toast-host { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: 8px; align-items: center; z-index: 60; pointer-events: none; }
+.toast-host .toast { pointer-events: auto; opacity: 1; transition: opacity 160ms ease, transform 160ms ease; }
+.toast--err { background: #7f1d1d; }
+.toast--err svg { color: #fca5a5; }
+.toast.is-leaving { opacity: 0; transform: translateY(6px); }
+.clip-item { transition: opacity 150ms ease, transform 150ms ease; }
+.clip-item.is-removing { opacity: 0; transform: translateY(-4px); }
+.bulkbar__count { font-size: 12px; font-weight: 600; color: var(--accent-ink);
+  background: var(--accent-soft); border: 1px solid var(--accent-border); border-radius: 999px; padding: 2px 9px; }
+.bulkbar.is-active { position: sticky; top: 8px; z-index: 20;
+  background: var(--surface); border: 1px solid var(--accent-border); border-radius: var(--r-sm);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, .08); padding: 8px 10px; }
+.btn[aria-busy="true"] { opacity: .62; pointer-events: none; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }

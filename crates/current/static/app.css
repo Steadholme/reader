@@ -449,3 +449,19 @@ hr { border:none; border-top:1px solid var(--border); margin:20px 0; }
 .kbd-help__head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 12px; }
 .kbd-help__head h2 { margin: 0; font-size: 17px; font-weight: 600; }
 kbd { display: inline-block; min-width: 20px; text-align: center; padding: 1px 7px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 6px; background: var(--surface-2); font: 600 12px/1.6 var(--mono, ui-monospace, monospace); color: var(--ink); }
+
+/* ============================================================================
+ * v2 progressive-enhancement additions (Feeds river): toast host, optimistic
+ * row removal, and a restrained hover/focus polish. Motion is 140-160ms and is
+ * fully disabled under prefers-reduced-motion by the global rule above.
+ * ========================================================================== */
+.toast-host { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: 8px; align-items: center; z-index: 60; pointer-events: none; }
+.toast-host .toast { pointer-events: auto; opacity: 1; transition: opacity 160ms ease, transform 160ms ease; }
+.toast--err { background: #7f1d1d; }
+.toast--err svg { color: #fca5a5; }
+.toast.is-leaving { opacity: 0; transform: translateY(6px); }
+.entry { transition: box-shadow 140ms ease, border-color 140ms ease, opacity 150ms ease, transform 150ms ease; }
+.entry:hover { border-color: var(--accent-border); box-shadow: 0 2px 10px rgba(15, 23, 42, .06); }
+.entry.is-removing { opacity: 0; transform: translateY(-4px); }
+.btn[aria-busy="true"] { opacity: .62; pointer-events: none; }

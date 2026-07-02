@@ -15,7 +15,9 @@ use crate::audit::AuditEvent;
 use crate::auth;
 use crate::config::MAX_CONTENT_CHARS;
 use crate::error::AppError;
-use crate::handlers::{esc, fmt_date, render_note_html, render_note_html_tagged, topbar, APP_CSS};
+use crate::handlers::{
+    esc, fmt_date, render_note_html, render_note_html_tagged, time_el, topbar, APP_CSS,
+};
 use crate::hashtag::parse_hashtags;
 use crate::store::{ActorFilter, Boost, Following, HomeNote, List, Note, Notification};
 use crate::{federation, now_nanos, now_secs, AppState};
@@ -162,7 +164,7 @@ fn render_boost_card(boost: &Boost, csrf: &str) -> String {
         url = esc(&boost.url),
         actor = esc(&boost.actor),
         body = render_note_html(&boost.content),
-        date = esc(&fmt_date(boost.created_at)),
+        date = time_el(boost.created_at),
         csrf = esc(csrf),
         uri = esc(&boost.note_uri),
     )
@@ -527,7 +529,7 @@ fn render_notification(n: &Notification, cfg: &crate::config::Config) -> String 
         actor_label = esc(&n.actor),
         detail = esc(detail),
         link = link,
-        date = esc(&fmt_date(n.created_at)),
+        date = time_el(n.created_at),
     )
 }
 
@@ -947,6 +949,111 @@ pub async fn unboost(
 }
 
 // ---------------------------------------------------------------------------
+// JSON siblings of /api/boost and /api/unboost (progressive enhancement)
+// ---------------------------------------------------------------------------
+//
+// Same double-submit CSRF, same store mutations, same audit + best-effort federation as the form
+// routes above, but they return small JSON and DO NOT redirect. The form routes are untouched, so
+// a no-JS browser still works; JS uses these for an optimistic, no-reload boost toggle on /home.
+
+/// `POST /api/boost/json` — boost a home note (server-side snapshot), returning
+/// `{ "ok": true, "boosted": true, "note_uri": … }`.
+pub async fn api_boost_json(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<BoostForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+
+    let note_uri = form.note_uri.trim();
+    if note_uri.is_empty() {
+        return Err(AppError::InvalidRequest("a note is required".to_string()));
+    }
+    let Some(hn) = state.store.get_home_note(note_uri).await else {
+        return Err(AppError::NotFound("no such note to boost".to_string()));
+    };
+    let boost = Boost {
+        id: format!("boost_{}", now_nanos()),
+        note_uri: hn.id.clone(),
+        actor: hn.actor.clone(),
+        content: hn.content.clone(),
+        url: hn.url.clone(),
+        created_at: now_secs(),
+    };
+    state.store.add_boost(&boost).await?;
+    tracing::info!(uri = %hn.id, "note boosted (json)");
+    state
+        .audit
+        .emit(AuditEvent::notice("crier.boost.add", &sub, &hn.id, "boost"));
+
+    if state.config.federate {
+        let client = state.http.clone();
+        let cfg = state.config.clone();
+        let store = state.store.clone();
+        let signer = state.signer.clone();
+        tokio::spawn(federation::deliver_announce(
+            client, cfg, store, signer, hn.id.clone(), hn.actor,
+        ));
+    }
+
+    Ok(axum::Json(serde_json::json!({ "ok": true, "boosted": true, "note_uri": hn.id }))
+        .into_response())
+}
+
+/// `POST /api/unboost/json` — remove a boost by note uri, returning
+/// `{ "ok": true, "boosted": false, "note_uri": … }`.
+pub async fn api_unboost_json(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<BoostForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+
+    let note_uri = form.note_uri.trim().to_string();
+    if note_uri.is_empty() {
+        return Err(AppError::InvalidRequest("a note is required".to_string()));
+    }
+    state.store.remove_boost(&note_uri).await?;
+    tracing::info!(uri = %note_uri, "note un-boosted (json)");
+    state.audit.emit(AuditEvent::notice(
+        "crier.boost.remove",
+        &sub,
+        &note_uri,
+        "unboost",
+    ));
+
+    if state.config.federate {
+        let client = state.http.clone();
+        let cfg = state.config.clone();
+        let store = state.store.clone();
+        let signer = state.signer.clone();
+        tokio::spawn(federation::deliver_undo_announce(
+            client,
+            cfg,
+            store,
+            signer,
+            note_uri.clone(),
+        ));
+    }
+
+    Ok(axum::Json(serde_json::json!({ "ok": true, "boosted": false, "note_uri": note_uri }))
+        .into_response())
+}
+
+/// `GET /api/notifications/unread` — the authed owner's unread notification count as
+/// `{ "unread": <n> }`. Read-only; drives the live nav badge.
+pub async fn api_notifications_unread(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let owner = auth::require_author(&headers)?.0;
+    let unread = state.store.count_unread_notifications(&owner).await;
+    Ok(axum::Json(serde_json::json!({ "unread": unread })).into_response())
+}
+
+// ---------------------------------------------------------------------------
 // Hashtag pages
 // ---------------------------------------------------------------------------
 
@@ -1307,7 +1414,7 @@ fn render_home_note_plain(note: &HomeNote, cfg: &crate::config::Config) -> Strin
         url = esc(&note.url),
         actor = esc(&note.actor),
         body = render_note_html(&note.content),
-        date = esc(&fmt_date(when)),
+        date = time_el(when),
         reply = reply,
     )
 }
@@ -1390,28 +1497,33 @@ fn render_home_note(
         "🔁 Boost"
     };
     let reply = render_reply_link(cfg, &note.in_reply_to);
+    let boosted_flag = if boosted { "1" } else { "0" };
+    let replybox = render_reply_composer(&note.id, csrf);
     format!(
         r#"<article class="note">
   <div class="note__meta"><a href="{url}" rel="noopener noreferrer nofollow">{actor}</a></div>
   <div class="note__body">{body}</div>
   <div class="note__meta">{date}{reply}</div>
   <div class="note__actions">
-    <form method="post" action="{action}">
+    <form method="post" action="{action}" data-boost-form data-boosted="{boosted_flag}" data-note-uri="{uri}">
       <input type="hidden" name="csrf_token" value="{csrf}">
       <input type="hidden" name="note_uri" value="{uri}">
       <button class="btn btn-ghost btn-sm" type="submit">{label}</button>
     </form>
+    {replybox}
   </div>
 </article>"#,
         url = esc(&note.url),
         actor = esc(&note.actor),
         body = render_note_html(&note.content),
-        date = esc(&fmt_date(when)),
+        date = time_el(when),
         reply = reply,
         action = action,
         label = label,
+        boosted_flag = boosted_flag,
         csrf = esc(csrf),
         uri = esc(&note.id),
+        replybox = replybox,
     )
 }
 
@@ -1519,6 +1631,39 @@ fn local_note_id_from_uri(cfg: &crate::config::Config, uri: &str) -> Option<Stri
         .map(str::to_string)
 }
 
+/// The canonical ActivityPub object id for one of OUR local notes
+/// (`{base}/users/{actor}/notes/{id}`) — the value `in_reply_to` carries to thread a reply onto it.
+fn note_object_uri(cfg: &crate::config::Config, id: &str) -> String {
+    format!("{}/users/{}/notes/{}", cfg.base_url(), cfg.actor, id)
+}
+
+/// An inline reply composer (progressive enhancement): a collapsible form that posts to the EXISTING
+/// `/api/notes` form route with a hidden `in_reply_to`, so a reply is just a note threaded onto the
+/// target. Works with no JS (full POST + redirect to `/`). `uri` is the object being replied to; an
+/// empty uri renders nothing. The char counter is added client-side by the shared script.
+fn render_reply_composer(uri: &str, csrf: &str) -> String {
+    if uri.is_empty() {
+        return String::new();
+    }
+    format!(
+        r#"<details class="note__reply">
+      <summary class="btn btn-ghost btn-sm">Reply</summary>
+      <form class="note__replyform" method="post" action="/api/notes" data-reply-form>
+        <input type="hidden" name="csrf_token" value="{csrf}">
+        <input type="hidden" name="in_reply_to" value="{uri}">
+        <div class="field">
+          <textarea name="content" class="composer__body" maxlength="5000" required placeholder="Write a reply…"></textarea>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary btn-sm" type="submit">Reply</button>
+        </div>
+      </form>
+    </details>"#,
+        csrf = esc(csrf),
+        uri = esc(uri),
+    )
+}
+
 /// One timeline note card: rendered (escaped) content + a UTC date, plus owner-only edit/delete
 /// controls when `owned`. Every interpolated field is escaped.
 fn render_note(note: &Note, csrf: &str, owned: bool, cfg: &crate::config::Config) -> String {
@@ -1534,17 +1679,20 @@ fn render_note(note: &Note, csrf: &str, owned: bool, cfg: &crate::config::Config
     };
     let media = render_media(&note.attachment_url);
     let reply = render_reply_link(cfg, &note.in_reply_to);
+    let replybox = render_reply_composer(&note_object_uri(cfg, &note.id), csrf);
     format!(
         r#"<article class="note">
   <div class="note__body">{body}</div>{media}
-  <div class="note__meta">{date}{edited} · <a href="/thread/{id}">Thread</a>{reply}</div>{controls}
+  <div class="note__meta">{date}{edited} · <a href="/thread/{id}">Thread</a>{reply}</div>
+  <div class="note__actions">{replybox}</div>{controls}
 </article>"#,
         id = esc(&note.id),
         body = render_note_html_tagged(&note.content),
         media = media,
-        date = esc(&fmt_date(note.created_at)),
+        date = time_el(note.created_at),
         edited = edited,
         reply = reply,
+        replybox = replybox,
         controls = controls,
     )
 }

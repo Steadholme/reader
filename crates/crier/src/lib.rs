@@ -81,6 +81,15 @@ pub fn app(state: AppState) -> Router {
         .route("/api/profile", post(handlers::web::set_profile))
         .route("/api/boost", post(handlers::web::boost))
         .route("/api/unboost", post(handlers::web::unboost))
+        // JSON siblings of the two boost routes above + a live unread-notifications count
+        // (progressive enhancement — additive, same CSRF + owner scope; the form routes stay for
+        // no-JS clients).
+        .route("/api/boost/json", post(handlers::web::api_boost_json))
+        .route("/api/unboost/json", post(handlers::web::api_unboost_json))
+        .route(
+            "/api/notifications/unread",
+            get(handlers::web::api_notifications_unread),
+        )
         .route("/blocks", get(handlers::web::blocks_page))
         .route("/blocks/block", post(handlers::web::block_actor))
         .route("/blocks/unblock", post(handlers::web::unblock_actor))

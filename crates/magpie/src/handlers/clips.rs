@@ -453,6 +453,72 @@ pub async fn favorite(
 }
 
 // ---------------------------------------------------------------------------
+// JSON siblings of /archive/{id} and /favorite/{id} (progressive enhancement)
+// ---------------------------------------------------------------------------
+//
+// Same double-submit CSRF, same ownership scope and audit log as the form routes above, but they
+// return small JSON and DO NOT redirect. The form routes are untouched, so a no-JS browser still
+// works; JS uses these for optimistic, no-reload archive/favorite toggles.
+
+/// `POST /api/archive/{id}` — CSRF-checked, owner-scoped archive toggle. Returns
+/// `{ "ok": true, "id": …, "archived": <new state> }`.
+pub async fn api_archive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<ActionForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let clip = match state.store.get(&id).await? {
+        Some(c) if c.owner_sub == who.subject => c,
+        Some(_) => {
+            return Err(AppError::Forbidden(
+                "You can only manage your own clips.".to_string(),
+            ))
+        }
+        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+    };
+    let now = !clip.archived;
+    state.store.set_archived(&id, &who.subject, now).await?;
+    tracing::info!(id, owner = who.subject, archived = now, "clip archive toggled (json)");
+    Ok(axum::Json(serde_json::json!({ "ok": true, "id": id, "archived": now })).into_response())
+}
+
+/// `POST /api/favorite/{id}` — CSRF-checked, owner-scoped favorite toggle. Returns
+/// `{ "ok": true, "id": …, "favorite": <new state> }`.
+pub async fn api_favorite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<ActionForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let clip = match state.store.get(&id).await? {
+        Some(c) if c.owner_sub == who.subject => c,
+        Some(_) => {
+            return Err(AppError::Forbidden(
+                "You can only manage your own clips.".to_string(),
+            ))
+        }
+        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+    };
+    let now = !clip.favorite;
+    state.store.set_favorite(&id, &who.subject, now).await?;
+    tracing::info!(id, owner = who.subject, favorite = now, "clip favorite toggled (json)");
+    Ok(axum::Json(serde_json::json!({ "ok": true, "id": id, "favorite": now })).into_response())
+}
+
+// ---------------------------------------------------------------------------
 // POST /delete/{id} — delete your own clip
 // ---------------------------------------------------------------------------
 
@@ -1180,12 +1246,13 @@ fn render_toolbar(csrf: &str, view: &str, auto_archive: bool) -> String {
            <form id=\"bulkForm\" class=\"bulkbar\" method=\"post\" action=\"/bulk\">\
              <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
              <input type=\"hidden\" name=\"view\" value=\"{view}\">\
-             <label class=\"check\"><input type=\"checkbox\" id=\"bulkSelectAll\"><span>Select all</span></label>\
+             <label class=\"check\"><input type=\"checkbox\" id=\"bulkSelectAll\" aria-label=\"Select all clips\"><span>Select all</span></label>\
+             <span class=\"bulkbar__count\" data-bulk-count hidden aria-live=\"polite\">0 selected</span>\
              <input class=\"bulk-tags\" type=\"text\" name=\"tags\" placeholder=\"tags for Tag\" autocomplete=\"off\">\
-             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"archive\">Archive</button>\
-             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"favorite\">Favorite</button>\
-             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"tag\">Tag</button>\
-             <button class=\"btn btn-danger btn-sm\" type=\"submit\" name=\"action\" value=\"delete\" \
+             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"archive\" data-bulk-btn>Archive</button>\
+             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"favorite\" data-bulk-btn>Favorite</button>\
+             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"tag\" data-bulk-btn>Tag</button>\
+             <button class=\"btn btn-danger btn-sm\" type=\"submit\" name=\"action\" value=\"delete\" data-bulk-btn \
                      onclick=\"return confirm('Delete the selected clips? This cannot be undone.');\">Delete</button>\
            </form>\
            <div class=\"listbar__right\">\
@@ -1200,10 +1267,45 @@ fn render_toolbar(csrf: &str, view: &str, auto_archive: bool) -> String {
              <a class=\"btn btn-ghost btn-sm\" href=\"/export?format=json\">Export .json</a>\
            </div>\
          </div>\
+         <div class=\"toast-host\" data-toast-host aria-live=\"polite\" aria-atomic=\"true\"></div>\
          <script>\
-           (function(){{var a=document.getElementById('bulkSelectAll');if(!a)return;\
-           a.addEventListener('change',function(){{document.querySelectorAll('input.bulk-check')\
-           .forEach(function(c){{c.checked=a.checked;}});}});}})();\
+         (function(){{\
+           function cookie(n){{var p=document.cookie?document.cookie.split('; '):[];for(var i=0;i<p.length;i++){{var e=p[i].indexOf('=');if(e>-1&&p[i].slice(0,e)===n)return decodeURIComponent(p[i].slice(e+1));}}return '';}}\
+           var CSRF=cookie('__Host-csrf');\
+           var host=document.querySelector('[data-toast-host]');\
+           function toast(msg,ok){{if(!host)return;var t=document.createElement('div');t.className='toast '+(ok?'toast--ok':'toast--err');t.setAttribute('role','status');t.textContent=msg;host.appendChild(t);setTimeout(function(){{t.classList.add('is-leaving');setTimeout(function(){{if(t.parentNode)t.parentNode.removeChild(t);}},200);}},2400);}}\
+           function post(url,params){{var b=Object.keys(params).map(function(k){{return encodeURIComponent(k)+'='+encodeURIComponent(params[k]);}}).join('&');return fetch(url,{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'}},body:b}}).then(function(r){{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}});}}\
+           /* --- bulk-select count + sticky + disabled state --- */\
+           var all=document.getElementById('bulkSelectAll');\
+           var bar=document.getElementById('bulkForm');\
+           var badge=document.querySelector('[data-bulk-count]');\
+           var actions=Array.prototype.slice.call(document.querySelectorAll('[data-bulk-btn]'));\
+           function checks(){{return Array.prototype.slice.call(document.querySelectorAll('input.bulk-check'));}}\
+           function sync(){{var cs=checks();var n=cs.filter(function(c){{return c.checked;}}).length;\
+             if(badge){{badge.textContent=n+' selected';if(n>0)badge.removeAttribute('hidden');else badge.setAttribute('hidden','');}}\
+             if(bar){{if(n>0)bar.classList.add('is-active');else bar.classList.remove('is-active');}}\
+             actions.forEach(function(b){{b.disabled=(n===0);}});\
+             if(all){{all.checked=(n>0&&n===cs.length);all.indeterminate=(n>0&&n<cs.length);}}}}\
+           if(all)all.addEventListener('change',function(){{checks().forEach(function(c){{c.checked=all.checked;}});sync();}});\
+           document.addEventListener('change',function(e){{if(e.target&&e.target.classList&&e.target.classList.contains('bulk-check'))sync();}});\
+           sync();\
+           /* --- optimistic per-card favorite / archive --- */\
+           var VIEW='{view}';\
+           function idOf(form){{var m=(form.getAttribute('action')||'').match(/\\/(favorite|archive)\\/([^\\/]+)$/);return m?decodeURIComponent(m[2]):'';}}\
+           function toggleFav(form){{var id=idOf(form);if(!id||!CSRF){{form.submit();return;}}var li=form.closest('.clip-item');var btn=form.querySelector('button');if(btn)btn.setAttribute('aria-busy','true');\
+             post('/api/favorite/'+encodeURIComponent(id),{{csrf_token:CSRF,view:VIEW}}).then(function(d){{var on=!!d.favorite;if(btn){{btn.removeAttribute('aria-busy');btn.textContent=on?'Unfavorite':'Favorite';}}\
+               if(li){{var meta=li.querySelector('[data-clip-meta]');var ex=li.querySelector('.badge--fav');if(on&&!ex&&meta){{var b=document.createElement('span');b.className='badge badge--fav';b.textContent='\\u2605 Favorite';var read=meta.querySelector('.badge--read,.badge--unread');if(read&&read.nextSibling)meta.insertBefore(b,read.nextSibling);else meta.insertBefore(b,meta.firstChild);}}else if(!on&&ex){{ex.parentNode.removeChild(ex);}}}}\
+               if(!on&&VIEW==='favorites'&&li){{li.classList.add('is-removing');setTimeout(function(){{if(li.parentNode)li.parentNode.removeChild(li);}},160);}}\
+               toast(on?'Added to favorites':'Removed from favorites',true);}}).catch(function(){{if(btn)btn.removeAttribute('aria-busy');toast('Could not update — try again',false);}});}}\
+           function toggleArchive(form){{var id=idOf(form);if(!id||!CSRF){{form.submit();return;}}var li=form.closest('.clip-item');var btn=form.querySelector('button');if(btn)btn.setAttribute('aria-busy','true');\
+             post('/api/archive/'+encodeURIComponent(id),{{csrf_token:CSRF,view:VIEW}}).then(function(d){{var on=!!d.archived;if(btn){{btn.removeAttribute('aria-busy');btn.textContent=on?'Unarchive':'Archive';}}\
+               var gone=(on&&(VIEW==='all'||VIEW==='unread'||VIEW==='favorites'))||(!on&&VIEW==='archive');\
+               if(gone&&li){{li.classList.add('is-removing');setTimeout(function(){{if(li.parentNode)li.parentNode.removeChild(li);}},160);}}\
+               toast(on?'Archived':'Moved to reading list',true);}}).catch(function(){{if(btn)btn.removeAttribute('aria-busy');toast('Could not update — try again',false);}});}}\
+           document.addEventListener('submit',function(e){{var f=e.target;if(!(f instanceof HTMLFormElement)||!CSRF)return;\
+             if(f.hasAttribute('data-fav-form')){{e.preventDefault();toggleFav(f);}}\
+             else if(f.hasAttribute('data-archive-form')){{e.preventDefault();toggleArchive(f);}}}});\
+         }})();\
          </script>",
         csrf = esc(csrf),
         view = esc(view),
@@ -1321,23 +1423,23 @@ fn render_clip_item(c: &Clip, csrf: &str, filter: Filter, selectable: bool) -> S
     };
 
     format!(
-        "<li class=\"clip-item\">\
+        "<li class=\"clip-item\" data-clip-id=\"{id}\">\
            {check}\
            <div class=\"clip-main\">\
              <a class=\"clip-title\" href=\"/r/{id}\">{title}</a>\
-             <div class=\"clip-meta\">{read_badge}{fav_badge}{site}{readtime}<span class=\"clip-time\">Saved {saved}</span></div>\
+             <div class=\"clip-meta\" data-clip-meta>{read_badge}{fav_badge}{site}{readtime}<span class=\"clip-time\">Saved {saved}</span></div>\
              {excerpt}\
              {progress}\
              {tags}\
            </div>\
            <div class=\"clip-actions\">\
              <a class=\"btn btn-ghost btn-sm\" href=\"{url_attr}\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">Source</a>\
-             <form class=\"inline-form\" method=\"post\" action=\"/favorite/{id}\">\
+             <form class=\"inline-form\" method=\"post\" action=\"/favorite/{id}\" data-fav-form>\
                <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
                <input type=\"hidden\" name=\"view\" value=\"{view}\">\
                <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{fav_label}</button>\
              </form>\
-             <form class=\"inline-form\" method=\"post\" action=\"/archive/{id}\">\
+             <form class=\"inline-form\" method=\"post\" action=\"/archive/{id}\" data-archive-form>\
                <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
                <input type=\"hidden\" name=\"view\" value=\"{view}\">\
                <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{archive_label}</button>\

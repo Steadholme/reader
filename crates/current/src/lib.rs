@@ -13,6 +13,9 @@
 //! - `GET /read/{id}` — in-app reader: fetch+extract (SSRF-guarded) + cache full text, mark read
 //! - `POST /i/{id}/read` — mark one read -> 303 `/` (CSRF)
 //! - `POST /i/{id}/star` — toggle the star/save flag -> 303 `/?filter=…` (CSRF)
+//! - `POST /api/i/{id}/read` — mark one read -> JSON `{ok,id,unread}` (CSRF; progressive-enhancement sibling)
+//! - `POST /api/i/{id}/star` — toggle star -> JSON `{ok,id,starred}` (CSRF; progressive-enhancement sibling)
+//! - `POST /api/read-all` — mark all read -> JSON `{ok,count,unread}` (CSRF; progressive-enhancement sibling)
 //! - `GET /api/item/{id}/summary` — extractive 1–2 sentence summary of an item (JSON)
 //! - `GET /feeds` — manage feeds (add form + categories + subscriptions grouped by category)
 //! - `POST /feeds` — add a feed by URL -> 303 `/feeds` (CSRF)
@@ -75,6 +78,11 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/i/{id}/read", post(handlers::river::mark_read))
         .route("/i/{id}/star", post(handlers::river::star))
+        // JSON siblings of the form routes above (progressive enhancement — additive, same CSRF +
+        // owner scope; the form routes stay for no-JS clients).
+        .route("/api/i/{id}/read", post(handlers::river::api_mark_read))
+        .route("/api/i/{id}/star", post(handlers::river::api_star))
+        .route("/api/read-all", post(handlers::river::api_mark_all))
         .route("/read/{id}", get(handlers::reader::read))
         .route(
             "/api/item/{id}/summary",

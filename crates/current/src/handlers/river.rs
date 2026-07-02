@@ -210,6 +210,92 @@ pub async fn item_summary(
 }
 
 // ---------------------------------------------------------------------------
+// JSON endpoints (progressive enhancement)
+// ---------------------------------------------------------------------------
+//
+// These mirror the form routes above — same double-submit CSRF, same owner scope, same store
+// mutations and audit logging — but return small JSON and DO NOT redirect. The original form
+// routes are untouched, so a no-JS browser still works; JS uses these for optimistic, no-reload
+// interactions (mark-read, star, mark-all) with a live unread count.
+
+/// Sum the owner's per-feed unread counts into a single total (drives the live count pill).
+async fn unread_total(state: &AppState, subject: &str) -> i64 {
+    state
+        .store
+        .feed_unread_counts(subject)
+        .await
+        .map(|rows| rows.iter().map(|(_, n)| *n).sum())
+        .unwrap_or(0)
+}
+
+/// `POST /api/i/{id}/read` — CSRF-checked, owner-scoped mark-one-read. Returns
+/// `{ "ok": true, "id": …, "unread": <total unread> }`. A foreign/missing item is a 404.
+pub async fn api_mark_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let updated = state.store.mark_item_read(&id, &who.subject).await?;
+    // `updated == false` means either the item was already read OR it is not in the owner's feeds.
+    // Distinguish the latter (a 404) so the client can reconcile; an already-read item is a no-op.
+    if !updated && state.store.get_item_owned(&id, &who.subject).await?.is_none() {
+        return Err(AppError::NotFound("No such item in your feeds.".to_string()));
+    }
+    let unread = unread_total(&state, &who.subject).await;
+    Ok(Json(serde_json::json!({ "ok": true, "id": id, "unread": unread })).into_response())
+}
+
+/// `POST /api/i/{id}/star` — CSRF-checked, owner-scoped star toggle. Returns
+/// `{ "ok": true, "id": …, "starred": <new state> }`. A foreign/missing item is a 404.
+pub async fn api_star(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<StarForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let now_starred = match state.store.get_item_owned(&id, &who.subject).await? {
+        Some(entry) => !entry.item.starred,
+        None => return Err(AppError::NotFound("No such item in your feeds.".to_string())),
+    };
+    state
+        .store
+        .set_item_starred(&id, &who.subject, now_starred)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true, "id": id, "starred": now_starred })).into_response())
+}
+
+/// `POST /api/read-all` — CSRF-checked; mark every unread item read. Returns
+/// `{ "ok": true, "count": <n marked>, "unread": 0 }`.
+pub async fn api_mark_all(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<CsrfForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let n = state.store.mark_all_read(&who.subject).await?;
+    tracing::info!(owner = who.subject, count = n, "marked all read (json)");
+    Ok(Json(serde_json::json!({ "ok": true, "count": n, "unread": 0 })).into_response())
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -271,6 +357,9 @@ fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64, filte
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("river", Some(email)))
         .replace("{{UNREAD}}", &esc(&count_label))
+        .replace("{{NOUN}}", noun)
+        .replace("{{LIMIT}}", &RIVER_LIMIT.to_string())
+        .replace("{{FILTER}}", filter)
         .replace("{{FILTERS}}", &render_filters(filter))
         .replace("{{CSRF}}", &esc(csrf))
         .replace("{{ENTRIES}}", &list)

@@ -15,6 +15,8 @@
 //! - `POST /r/{id}/highlight` — add a highlight (+ optional note) -> 302 `/r/{id}` (CSRF-checked)
 //! - `POST /archive/{id}` — toggle archived -> 302 back (CSRF-checked)
 //! - `POST /favorite/{id}` — toggle favorite (starred) -> 302 back (CSRF-checked)
+//! - `POST /api/archive/{id}` — toggle archived -> JSON `{ok,id,archived}` (CSRF; progressive-enhancement sibling)
+//! - `POST /api/favorite/{id}` — toggle favorite -> JSON `{ok,id,favorite}` (CSRF; progressive-enhancement sibling)
 //! - `POST /delete/{id}` — delete your own clip -> 302 back (CSRF-checked)
 //! - `POST /tags/{id}` — edit your own clip's tags -> 302 `/r/{id}` (CSRF-checked)
 //! - `POST /bulk` — archive/unarchive/favorite/unfavorite/delete/tag many selected clips at once (CSRF-checked, owner-scoped)
@@ -68,6 +70,10 @@ pub fn app(state: AppState) -> Router {
         .route("/r/{id}/highlight", post(handlers::clips::add_highlight))
         .route("/archive/{id}", post(handlers::clips::archive))
         .route("/favorite/{id}", post(handlers::clips::favorite))
+        // JSON siblings of the two toggle routes above (progressive enhancement — additive, same
+        // CSRF + ownership scope; the form routes stay for no-JS clients).
+        .route("/api/archive/{id}", post(handlers::clips::api_archive))
+        .route("/api/favorite/{id}", post(handlers::clips::api_favorite))
         .route("/delete/{id}", post(handlers::clips::delete))
         .route("/tags/{id}", post(handlers::clips::edit_tags))
         .route("/bulk", post(handlers::clips::bulk))

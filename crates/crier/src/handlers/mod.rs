@@ -95,6 +95,31 @@ const ICON_BAN: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentC
 const ICON_CARET: &str = r##"<svg class="usermenu__caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>"##;
 const ICON_LOGOUT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>"##;
 
+/// Progressive-enhancement companion emitted right after the app-bar on every SSO page: a fixed
+/// toast host plus one small script that (1) renders relative timestamps from `<time data-ts>` (the
+/// absolute date stays as the no-JS fallback + hover title), (2) fills the live unread-notifications
+/// nav badge, (3) adds char counters to composer/reply textareas, and (4) makes the /home boost
+/// button optimistic (no reload; rolls back + toasts on failure). All remote/dynamic text is set
+/// via `textContent`, never `innerHTML`. It is inert on pages that lack the matching elements.
+const TOPBAR_ENHANCE: &str = r#"
+<div class="toast-host" data-toast-host aria-live="polite" aria-atomic="true"></div>
+<script>
+(function(){
+  function cookie(n){var p=document.cookie?document.cookie.split('; '):[];for(var i=0;i<p.length;i++){var e=p[i].indexOf('=');if(e>-1&&p[i].slice(0,e)===n)return decodeURIComponent(p[i].slice(e+1));}return '';}
+  var CSRF=cookie('__Host-csrf');
+  var host=document.querySelector('[data-toast-host]');
+  function toast(msg,ok){if(!host)return;var t=document.createElement('div');t.className='toast '+(ok?'toast--ok':'toast--err');t.setAttribute('role','status');t.textContent=msg;host.appendChild(t);setTimeout(function(){t.classList.add('is-leaving');setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t);},200);},2400);}
+  function post(url,params){var b=Object.keys(params).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(params[k]);}).join('&');return fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},body:b}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();});}
+  function rel(ts){var now=Math.floor(Date.now()/1000);var d=now-ts;if(d<0||isNaN(d))return null;if(d<60)return 'just now';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';if(d<2592000)return Math.floor(d/86400)+'d ago';return null;}
+  Array.prototype.forEach.call(document.querySelectorAll('time.ts[data-ts]'),function(t){var r=rel(parseInt(t.getAttribute('data-ts'),10));if(r)t.textContent=r;});
+  var badge=document.querySelector('[data-notif-badge]');
+  if(badge){fetch('/api/notifications/unread',{credentials:'same-origin',headers:{'Accept':'application/json'}}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(d&&d.unread>0){badge.textContent=d.unread>99?'99+':String(d.unread);badge.removeAttribute('hidden');}}).catch(function(){});}
+  Array.prototype.forEach.call(document.querySelectorAll('textarea[maxlength]'),function(ta){var max=parseInt(ta.getAttribute('maxlength'),10);if(!max)return;var c=document.createElement('div');c.className='char-counter';function upd(){var n=ta.value.length;c.textContent=n+'/'+max;if(n>=max)c.classList.add('is-max');else c.classList.remove('is-max');}if(ta.parentNode)ta.parentNode.appendChild(c);upd();ta.addEventListener('input',upd);});
+  function toggleBoost(form){var on=form.getAttribute('data-boosted')==='1';var uri=form.getAttribute('data-note-uri')||'';var btn=form.querySelector('button');if(!uri||!CSRF){form.submit();return;}if(btn)btn.setAttribute('aria-busy','true');var url=on?'/api/unboost/json':'/api/boost/json';post(url,{csrf_token:CSRF,note_uri:uri,from:'home'}).then(function(d){var nowOn=!!d.boosted;form.setAttribute('data-boosted',nowOn?'1':'0');form.setAttribute('action',nowOn?'/api/unboost':'/api/boost');if(btn){btn.removeAttribute('aria-busy');btn.textContent=nowOn?'🔁 Un-boost':'🔁 Boost';}toast(nowOn?'Boost added':'Boost removed',true);}).catch(function(){if(btn)btn.removeAttribute('aria-busy');toast('Could not update — try again',false);});}
+  document.addEventListener('submit',function(e){var f=e.target;if(!(f instanceof HTMLFormElement))return;if(f.hasAttribute('data-boost-form')){e.preventDefault();toggleBoost(f);}});
+})();
+</script>"#;
+
 /// Render the shared app-bar (v2): the at-sign brand tile + Social lockup on the left; the
 /// Profile/Home nav; then an "All apps" waffle back to the apex portal and a CSS focus-within
 /// avatar menu (Account · All apps · Log out). `page_title` selects the active nav item. The
@@ -133,7 +158,7 @@ pub fn topbar(page_title: &str, email: &str) -> String {
         email
     };
     let (initials, name, sub) = identity_bits(ident);
-    format!(
+    let header = format!(
         r#"<header class="appbar">
   <a class="appbar__brand" href="/" aria-label="HOLDFAST Social">
     <span class="app-tile" style="--app:#7c3aed;--app-soft:#f4f0fe" aria-hidden="true">{shield}</span>
@@ -143,7 +168,7 @@ pub fn topbar(page_title: &str, email: &str) -> String {
     <a class="appnav{profile_cls}" href="/">{icon_user}Profile</a>
     <a class="appnav{home_cls}" href="/home">{icon_home}Home</a>
     <a class="appnav{lists_cls}" href="/lists">{icon_list}Lists</a>
-    <a class="appnav{notifications_cls}" href="/notifications">{icon_bell}Notifications</a>
+    <a class="appnav{notifications_cls}" href="/notifications">{icon_bell}Notifications<span class="nav-badge" data-notif-badge hidden aria-label="unread notifications"></span></a>
     <a class="appnav{blocks_cls}" href="/blocks">{icon_ban}Blocks</a>
   </nav>
   <span class="appbar__spacer"></span>
@@ -180,7 +205,9 @@ pub fn topbar(page_title: &str, email: &str) -> String {
         name = esc(&name),
         sub = esc(&sub),
         logout = LOGOUT_URL,
-    )
+    );
+    // Append the shared toast host + progressive-enhancement script (inert where it finds nothing).
+    format!("{header}{enhance}", header = header, enhance = TOPBAR_ENHANCE)
 }
 
 /// Derive the avatar initials, the primary display name, and a secondary menu line from a
@@ -210,6 +237,18 @@ pub fn fmt_date(secs: i64) -> String {
         Ok(dt) => format!("{} {}, {}", month_abbr(dt.month()), dt.day(), dt.year()),
         Err(_) => secs.to_string(),
     }
+}
+
+/// A `<time>` element carrying the epoch seconds in `data-ts` so the shared client script can
+/// render a live relative label ("5m ago"). The server-rendered text AND the hover `title` are the
+/// absolute UTC date, so a no-JS reader still sees a real, stable timestamp (backward compatible).
+pub fn time_el(secs: i64) -> String {
+    let abs = fmt_date(secs);
+    format!(
+        r#"<time class="ts" data-ts="{secs}" title="{abs}">{abs}</time>"#,
+        secs = secs,
+        abs = esc(&abs),
+    )
 }
 
 fn month_abbr(m: time::Month) -> &'static str {
