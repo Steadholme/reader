@@ -7,15 +7,20 @@
 //!
 //! Endpoints (served at the subdomain ROOT — Sluice forwards the path unmodified):
 //! - `GET  /healthz` — liveness (public)
-//! - `GET  /` — reading list (filters: all / unread / archived; `?tag=` view) + save form + bookmarklet
+//! - `GET  /` — reading list (views: all / unread / favorites / archive; `?tag=` view) + save form + bulk toolbar + bookmarklet
 //! - `GET  /search?q=` — full-text search over title + extracted text (keyset-paginated)
 //! - `GET  /clip?u=` — bookmarklet landing: SSO confirm page that POSTs to `/clip`
 //! - `POST /clip` — fetch the URL, extract, save (with optional tags) -> 302 `/` (CSRF-checked)
-//! - `GET  /r/{id}` — clean reader view of the saved text; marks the clip read; shows highlights
+//! - `GET  /r/{id}` — clean reader view of the saved text; marks the clip read (auto-archives if enabled); shows highlights
 //! - `POST /r/{id}/highlight` — add a highlight (+ optional note) -> 302 `/r/{id}` (CSRF-checked)
 //! - `POST /archive/{id}` — toggle archived -> 302 back (CSRF-checked)
+//! - `POST /favorite/{id}` — toggle favorite (starred) -> 302 back (CSRF-checked)
 //! - `POST /delete/{id}` — delete your own clip -> 302 back (CSRF-checked)
 //! - `POST /tags/{id}` — edit your own clip's tags -> 302 `/r/{id}` (CSRF-checked)
+//! - `POST /bulk` — archive/unarchive/favorite/unfavorite/delete/tag many selected clips at once (CSRF-checked, owner-scoped)
+//! - `POST /progress/{id}` — persist reading progress percent (throttled AJAX from the reader) -> 204 (CSRF-checked)
+//! - `POST /settings` — set the owner's auto-archive-on-read preference -> 302 back (CSRF-checked)
+//! - `GET  /export?format=md|json` — the owner's clips + highlights/notes as an inert attachment
 //! - `GET  /highlights` — every highlight the owner has made (aggregate), grouped by clip
 //! - `POST /highlight/{hid}/delete` — delete one of your highlights -> 302 back (CSRF-checked)
 
@@ -62,8 +67,13 @@ pub fn app(state: AppState) -> Router {
         .route("/r/{id}", get(handlers::clips::reader))
         .route("/r/{id}/highlight", post(handlers::clips::add_highlight))
         .route("/archive/{id}", post(handlers::clips::archive))
+        .route("/favorite/{id}", post(handlers::clips::favorite))
         .route("/delete/{id}", post(handlers::clips::delete))
         .route("/tags/{id}", post(handlers::clips::edit_tags))
+        .route("/bulk", post(handlers::clips::bulk))
+        .route("/progress/{id}", post(handlers::clips::set_progress))
+        .route("/settings", post(handlers::clips::settings))
+        .route("/export", get(handlers::clips::export))
         .route("/highlights", get(handlers::clips::highlights))
         .route(
             "/highlight/{hid}/delete",

@@ -160,6 +160,31 @@ pub fn esc(s: &str) -> String {
     out
 }
 
+/// Escape a string for inclusion in the Markdown EXPORT. The HTML-active trio `& < >` becomes
+/// entities (so no raw HTML tag can survive to execute in any downstream Markdown renderer), and
+/// the structural Markdown metacharacters are backslash-escaped (so remote/owner text can't inject
+/// headings, emphasis, links or code). Combined with the export's `attachment`/`nosniff` headers,
+/// the file is inert wherever it is later opened. Newlines are collapsed to spaces so a single
+/// field cannot break the surrounding list/blockquote structure.
+pub fn md_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\\' | '`' | '*' | '_' | '[' | ']' | '#' | '|' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\r' => {}
+            '\n' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +192,16 @@ mod tests {
     #[test]
     fn escapes_html_metacharacters() {
         assert_eq!(esc("<script>&\"'"), "&lt;script&gt;&amp;&quot;&#x27;");
+    }
+
+    #[test]
+    fn md_escape_neutralizes_html_and_markdown() {
+        // Raw HTML angle brackets become entities (inert in any downstream renderer).
+        assert_eq!(md_escape("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;/script&gt;");
+        // Markdown structural metacharacters are backslash-escaped.
+        assert_eq!(md_escape("a*b_c`d[e]#f|g\\h"), "a\\*b\\_c\\`d\\[e\\]\\#f\\|g\\\\h");
+        // Newlines collapse to spaces so a field can't break the surrounding structure.
+        assert_eq!(md_escape("line1\r\nline2"), "line1 line2");
     }
 
     #[test]

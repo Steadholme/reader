@@ -16,14 +16,16 @@ use serde::Deserialize;
 
 use crate::auth::{self, Identity};
 use crate::config::{
-    DEFAULT_PAGE, MAX_NOTE_CHARS, MAX_PAGE, MAX_QUOTE_CHARS, MAX_TAGS_INPUT_CHARS, MAX_TITLE_CHARS,
-    MAX_URL_CHARS,
+    DEFAULT_PAGE, EXPORT_LIMIT, MAX_BULK_IDS, MAX_NOTE_CHARS, MAX_PAGE, MAX_QUOTE_CHARS,
+    MAX_TAGS_INPUT_CHARS, MAX_TITLE_CHARS, MAX_URL_CHARS,
 };
 use crate::error::AppError;
 use crate::extract;
 use crate::fetch::parse_http_url;
-use crate::handlers::{bookmarklet_href, esc, fmt_ts, userbox, APP_CSS, SHIELD_SVG};
-use crate::model::{normalize_tags, Clip, Cursor, Filter, Highlight};
+use crate::handlers::{bookmarklet_href, esc, fmt_ts, md_escape, userbox, APP_CSS, SHIELD_SVG};
+use crate::model::{
+    clamp_progress, normalize_tags, reading_minutes, word_count, Clip, Cursor, Filter, Highlight,
+};
 use crate::{now_secs, random_alnum, AppState};
 
 /// Length of the short random clip id (62-symbol alphabet => ~48 bits at 8 chars; the
@@ -45,6 +47,10 @@ const HIGHLIGHTS_HTML: &str = include_str!("../../templates/highlights.html");
 
 #[derive(Debug, Deserialize)]
 pub struct IndexQuery {
+    /// Canonical view selector: `all` / `unread` / `favorites` / `archive`.
+    #[serde(default)]
+    pub view: String,
+    /// Legacy alias for `view` (kept so old links/bookmarks keep working).
     #[serde(default)]
     pub filter: String,
     /// Optional tag filter: `/?tag=rust` shows the owner's non-archived clips carrying that tag.
@@ -52,8 +58,19 @@ pub struct IndexQuery {
     pub tag: String,
 }
 
-/// `GET /` — render the reading list for the selected filter (or `?tag=`), the save form, and the
-/// bookmarklet.
+impl IndexQuery {
+    /// The effective view token, preferring `?view=` and falling back to the legacy `?filter=`.
+    fn view_token(&self) -> &str {
+        if !self.view.trim().is_empty() {
+            self.view.trim()
+        } else {
+            self.filter.trim()
+        }
+    }
+}
+
+/// `GET /` — render the reading list for the selected view (or `?tag=`), the save form, the bulk
+/// toolbar, and the bookmarklet.
 pub async fn index(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -62,7 +79,8 @@ pub async fn index(
     let who = auth::identity(&headers);
     let csrf = auth::new_csrf_token();
 
-    // `?tag=` is a distinct view over the active list; otherwise the All/Unread/Archived filter.
+    // `?tag=` is a distinct view over the active list; otherwise the all/unread/favorites/archive
+    // view.
     let tag = q.tag.trim();
     let (filter, tag_view, clips) = if !tag.is_empty() {
         let clips = state
@@ -72,7 +90,7 @@ pub async fn index(
             .unwrap_or_default();
         (Filter::All, Some(tag.to_string()), clips)
     } else {
-        let filter = Filter::parse(&q.filter);
+        let filter = Filter::parse(q.view_token());
         let clips = state
             .store
             .list(&who.subject, filter)
@@ -81,7 +99,21 @@ pub async fn index(
         (filter, None, clips)
     };
 
-    let html = render_index(&state, &who, &csrf, filter, tag_view.as_deref(), &clips);
+    let auto_archive = state
+        .store
+        .get_auto_archive(&who.subject)
+        .await
+        .unwrap_or(false);
+
+    let html = render_index(
+        &state,
+        &who,
+        &csrf,
+        filter,
+        tag_view.as_deref(),
+        &clips,
+        auto_archive,
+    );
     html_with_csrf(StatusCode::OK, html, &csrf)
 }
 
@@ -258,6 +290,8 @@ pub async fn clip_create(
         saved_at: now,
         read: false,
         archived: false,
+        favorite: false,
+        progress: 0,
         tags,
     };
 
@@ -293,13 +327,21 @@ pub async fn reader(
 ) -> Result<Response, AppError> {
     let who = auth::identity(&headers);
 
-    let clip = match state.store.get(&id).await? {
+    let mut clip = match state.store.get(&id).await? {
         Some(c) if c.owner_sub == who.subject => c,
         _ => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
     };
 
     // Marking read is the intended side effect of opening the reader (idempotent).
     let _ = state.store.mark_read(&id, &who.subject).await?;
+    clip.read = true;
+
+    // Optional per-owner preference: opening the reader auto-archives the clip (default off).
+    if !clip.archived && state.store.get_auto_archive(&who.subject).await.unwrap_or(false) {
+        let _ = state.store.set_archived(&id, &who.subject, true).await?;
+        clip.archived = true;
+        tracing::info!(id, owner = who.subject, "clip auto-archived on read");
+    }
 
     // The clip's own highlights, shown in a margin beside the article.
     let highlights = state
@@ -321,9 +363,23 @@ pub async fn reader(
 pub struct ActionForm {
     #[serde(default)]
     pub csrf_token: String,
-    /// The reading-list filter to return to (so the action keeps the user in the same view).
+    /// The reading-list view to return to (so the action keeps the user in the same tab).
+    #[serde(default)]
+    pub view: String,
+    /// Legacy alias for `view` (older forms/links posted `filter`).
     #[serde(default)]
     pub filter: String,
+}
+
+impl ActionForm {
+    /// The effective return-view token, preferring `view` and falling back to legacy `filter`.
+    fn view_token(&self) -> &str {
+        if !self.view.trim().is_empty() {
+            self.view.trim()
+        } else {
+            self.filter.trim()
+        }
+    }
 }
 
 /// `POST /archive/{id}` — CSRF-checked, ownership-scoped toggle of the archived flag, then 302
@@ -355,7 +411,45 @@ pub async fn archive(
         .store
         .set_archived(&id, &who.subject, !clip.archived)
         .await?;
-    Ok(redirect_found(&back_to(&form.filter)))
+    tracing::info!(id, owner = who.subject, archived = !clip.archived, "clip archive toggled");
+    Ok(redirect_found(&back_to(form.view_token())))
+}
+
+// ---------------------------------------------------------------------------
+// POST /favorite/{id} — toggle the favorite (starred) flag
+// ---------------------------------------------------------------------------
+
+/// `POST /favorite/{id}` — CSRF-checked, ownership-scoped toggle of the favorite flag, then 302
+/// back to the originating list view.
+pub async fn favorite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<ActionForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+
+    let clip = match state.store.get(&id).await? {
+        Some(c) if c.owner_sub == who.subject => c,
+        Some(_) => {
+            return Err(AppError::Forbidden(
+                "You can only manage your own clips.".to_string(),
+            ))
+        }
+        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+    };
+
+    state
+        .store
+        .set_favorite(&id, &who.subject, !clip.favorite)
+        .await?;
+    tracing::info!(id, owner = who.subject, favorite = !clip.favorite, "clip favorite toggled");
+    Ok(redirect_found(&back_to(form.view_token())))
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +472,7 @@ pub async fn delete(
 
     if state.store.delete(&id, &who.subject).await? {
         tracing::info!(id, owner = who.subject, "clip deleted");
-        return Ok(redirect_found(&back_to(&form.filter)));
+        return Ok(redirect_found(&back_to(form.view_token())));
     }
     // Nothing deleted: distinguish "not yours" from "does not exist" for a precise message.
     match state.store.get(&id).await? {
@@ -601,6 +695,217 @@ pub async fn highlights(State(state): State<AppState>, headers: HeaderMap) -> Re
 }
 
 // ---------------------------------------------------------------------------
+// POST /bulk — act on many selected clips at once
+// ---------------------------------------------------------------------------
+
+/// `POST /bulk` — CSRF-checked, ownership-scoped batch action over the selected clip ids. The
+/// body is `application/x-www-form-urlencoded` with a REPEATED `ids` field (one per checkbox),
+/// which `serde_urlencoded` cannot decode into a `Vec`, so the body is parsed manually. Supported
+/// actions: `archive`, `unarchive`, `favorite`, `unfavorite`, `delete`, `tag` (replaces tags with
+/// the `tags` field). Every mutation is owner-scoped in the store, so a non-owned id is a no-op.
+pub async fn bulk(State(state): State<AppState>, headers: HeaderMap, body: String) -> Result<Response, AppError> {
+    let fields = parse_urlencoded(&body);
+    let field = |key: &str| -> String {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+
+    if !auth::verify_csrf(&headers, &field("csrf_token")) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+
+    let action = field("action");
+    let view_token = {
+        let v = field("view");
+        if v.trim().is_empty() { field("filter") } else { v }
+    };
+
+    // Collect the selected ids (deduplicated, bounded).
+    let mut ids: Vec<String> = Vec::new();
+    for (k, v) in &fields {
+        if k == "ids" && !v.is_empty() && !ids.iter().any(|e| e == v) {
+            ids.push(v.clone());
+            if ids.len() >= MAX_BULK_IDS {
+                break;
+            }
+        }
+    }
+    if ids.is_empty() {
+        // Nothing selected — just return to the list rather than erroring.
+        return Ok(redirect_found(&back_to(&view_token)));
+    }
+
+    // For the tag action, normalize the shared tag string once.
+    let tags = if action == "tag" {
+        let raw: String = field("tags").chars().take(MAX_TAGS_INPUT_CHARS).collect();
+        Some(normalize_tags(&raw))
+    } else {
+        None
+    };
+
+    let mut changed = 0usize;
+    for id in &ids {
+        let ok = match action.as_str() {
+            "archive" => state.store.set_archived(id, &who.subject, true).await?,
+            "unarchive" => state.store.set_archived(id, &who.subject, false).await?,
+            "favorite" => state.store.set_favorite(id, &who.subject, true).await?,
+            "unfavorite" => state.store.set_favorite(id, &who.subject, false).await?,
+            "delete" => state.store.delete(id, &who.subject).await?,
+            "tag" => {
+                state
+                    .store
+                    .set_tags(id, &who.subject, tags.clone().unwrap_or(None))
+                    .await?
+            }
+            other => {
+                return Err(AppError::BadRequest(format!(
+                    "Unknown bulk action: {}",
+                    other
+                )))
+            }
+        };
+        if ok {
+            changed += 1;
+        }
+    }
+    tracing::info!(owner = who.subject, action, selected = ids.len(), changed, "bulk action");
+    Ok(redirect_found(&back_to(&view_token)))
+}
+
+// ---------------------------------------------------------------------------
+// GET /export — the owner's clips (+ highlights/notes) as Markdown or JSON
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ExportQuery {
+    /// `json` -> JSON; anything else (incl. `md` / `markdown` / missing) -> Markdown.
+    #[serde(default)]
+    pub format: String,
+}
+
+/// `GET /export?format=md|json` — a Readwise-style export of the owner's clips together with their
+/// highlights and notes. Owner-scoped; served INERT (an `attachment` with `X-Content-Type-Options:
+/// nosniff`) so a browser downloads it rather than rendering any embedded markup.
+pub async fn export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ExportQuery>,
+) -> Result<Response, AppError> {
+    let who = auth::identity(&headers);
+
+    let clips = state.store.export_clips(&who.subject, EXPORT_LIMIT).await?;
+    let highlights = state
+        .store
+        .export_highlights(&who.subject, EXPORT_LIMIT)
+        .await?;
+
+    let as_json = matches!(q.format.trim(), "json");
+    let (body, content_type, filename) = if as_json {
+        (
+            export_json(&clips, &highlights),
+            "application/json; charset=utf-8",
+            "magpie-export.json",
+        )
+    } else {
+        (
+            export_markdown(&clips, &highlights),
+            "text/markdown; charset=utf-8",
+            "magpie-export.md",
+        )
+    };
+
+    tracing::info!(owner = who.subject, json = as_json, clips = clips.len(), "export served");
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /progress/{id} — persist reading progress (throttled AJAX from the reader)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ProgressForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    /// Raw client-reported percent; clamped to `[0, 100]` before storage.
+    #[serde(default)]
+    pub progress: i64,
+}
+
+/// `POST /progress/{id}` — CSRF-checked, ownership-scoped write of the reading-progress percent,
+/// returning `204 No Content` (the reader posts this from JS, not a navigation). The value is
+/// clamped to `[0, 100]`; a non-owned/missing id is a silent no-op (still 204) so the beacon never
+/// surfaces a scary error mid-scroll.
+pub async fn set_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<ProgressForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let pct = clamp_progress(form.progress);
+    let _ = state.store.set_progress(&id, &who.subject, pct).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /settings — per-owner preferences (auto-archive on read)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    /// Present (any value) when the checkbox is ticked; absent when unticked.
+    #[serde(default)]
+    pub auto_archive: Option<String>,
+    #[serde(default)]
+    pub view: String,
+}
+
+/// `POST /settings` — CSRF-checked write of the owner's auto-archive-on-read preference, then 302
+/// back to the reading list. An HTML checkbox only submits its field when ticked, so presence maps
+/// to `true` and absence to `false`.
+pub async fn settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<SettingsForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let on = form.auto_archive.is_some();
+    state.store.set_auto_archive(&who.subject, on).await?;
+    tracing::info!(owner = who.subject, auto_archive = on, "settings updated");
+    Ok(redirect_found(&back_to(form.view.trim())))
+}
+
+// ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
@@ -624,9 +929,170 @@ fn clamp_opt(s: &str, max: usize) -> Option<String> {
     }
 }
 
-/// Canonical list path for a (possibly junk) filter token.
-fn back_to(filter: &str) -> String {
-    format!("/?filter={}", Filter::parse(filter).as_str())
+/// Canonical list path for a (possibly junk) view token.
+fn back_to(view: &str) -> String {
+    format!("/?view={}", Filter::parse(view).as_str())
+}
+
+/// Parse an `application/x-www-form-urlencoded` body into ordered `(key, value)` pairs, preserving
+/// REPEATED keys (needed for the bulk `ids` multi-select, which `serde_urlencoded` drops). `+` maps
+/// to space and `%XX` is percent-decoded; malformed escapes are passed through literally.
+fn parse_urlencoded(body: &str) -> Vec<(String, String)> {
+    body.split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| match pair.split_once('=') {
+            Some((k, v)) => (pct_decode(k), pct_decode(v)),
+            None => (pct_decode(pair), String::new()),
+        })
+        .collect()
+}
+
+/// Percent-decode one form component (`+` -> space, `%XX` -> byte), lossily UTF-8 decoding the
+/// result. A stray `%` not followed by two hex digits is kept verbatim.
+fn pct_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' => {
+                match (
+                    bytes.get(i + 1).copied().and_then(hex_val),
+                    bytes.get(i + 2).copied().and_then(hex_val),
+                ) {
+                    (Some(h), Some(l)) => {
+                        out.push((h << 4) | l);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Value of a single hex ASCII digit, or `None`.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Build the JSON export of the owner's clips + highlights. Serialized via `serde_json`, which
+/// escapes every string value, so remote/owner text can never break the document structure.
+fn export_json(clips: &[Clip], highlights: &[Highlight]) -> String {
+    use serde_json::{Map, Value};
+
+    let items: Vec<Value> = clips
+        .iter()
+        .map(|c| {
+            let hls: Vec<Value> = highlights
+                .iter()
+                .filter(|h| h.clip_id == c.id)
+                .map(|h| {
+                    let mut m = Map::new();
+                    m.insert("quote".into(), Value::String(h.quote.clone()));
+                    m.insert(
+                        "note".into(),
+                        match &h.note {
+                            Some(n) => Value::String(n.clone()),
+                            None => Value::Null,
+                        },
+                    );
+                    m.insert("created_at".into(), Value::from(h.created_at));
+                    Value::Object(m)
+                })
+                .collect();
+            let mut m = Map::new();
+            m.insert("id".into(), Value::String(c.id.clone()));
+            m.insert("url".into(), Value::String(c.url.clone()));
+            m.insert("title".into(), Value::String(c.title.clone()));
+            m.insert("site".into(), Value::String(c.site.clone()));
+            m.insert("excerpt".into(), Value::String(c.excerpt.clone()));
+            m.insert("saved_at".into(), Value::from(c.saved_at));
+            m.insert("read".into(), Value::Bool(c.read));
+            m.insert("archived".into(), Value::Bool(c.archived));
+            m.insert("favorite".into(), Value::Bool(c.favorite));
+            m.insert("progress".into(), Value::from(c.progress));
+            m.insert(
+                "tags".into(),
+                match &c.tags {
+                    Some(t) => Value::String(t.clone()),
+                    None => Value::Null,
+                },
+            );
+            m.insert("highlights".into(), Value::Array(hls));
+            Value::Object(m)
+        })
+        .collect();
+
+    let mut root = Map::new();
+    root.insert("version".into(), Value::from(1));
+    root.insert("clips".into(), Value::Array(items));
+    serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Build the Markdown export of the owner's clips + highlights. Every remote/owner string is run
+/// through [`md_escape`], so no embedded HTML or Markdown control sequence survives — combined with
+/// the `attachment`/`nosniff` response headers the file is inert wherever it is later opened.
+fn export_markdown(clips: &[Clip], highlights: &[Highlight]) -> String {
+    let mut out = String::from("# Magpie export\n\n");
+    if clips.is_empty() {
+        out.push_str("_No clips saved._\n");
+        return out;
+    }
+    for c in clips {
+        let title = if c.title.trim().is_empty() {
+            "Untitled".to_string()
+        } else {
+            md_escape(&c.title)
+        };
+        out.push_str(&format!("## {title}\n\n"));
+        // Plain escaped text (not a `<...>` autolink) so backslash-escaped chars render literally.
+        out.push_str(&format!("- URL: {}\n", md_escape(&c.url)));
+        if !c.site.trim().is_empty() {
+            out.push_str(&format!("- Site: {}\n", md_escape(&c.site)));
+        }
+        out.push_str(&format!("- Saved: {}\n", fmt_ts(c.saved_at)));
+        let status = if c.archived { "archived" } else if c.read { "read" } else { "unread" };
+        out.push_str(&format!("- Status: {status}{}\n", if c.favorite { " · favorite" } else { "" }));
+        if let Some(t) = &c.tags {
+            out.push_str(&format!("- Tags: {}\n", md_escape(t)));
+        }
+        if !c.excerpt.trim().is_empty() {
+            out.push_str(&format!("\n{}\n", md_escape(&c.excerpt)));
+        }
+        let hls: Vec<&Highlight> = highlights.iter().filter(|h| h.clip_id == c.id).collect();
+        if !hls.is_empty() {
+            out.push_str("\n### Highlights\n\n");
+            for h in hls {
+                out.push_str(&format!("> {}\n", md_escape(&h.quote)));
+                if let Some(n) = &h.note {
+                    if !n.trim().is_empty() {
+                        out.push_str(&format!(">\n> Note: {}\n", md_escape(n)));
+                    }
+                }
+                out.push('\n');
+            }
+        }
+        out.push_str("\n---\n\n");
+    }
+    out
 }
 
 /// Wrap rendered HTML in a response that also (re)sets the CSRF cookie.
@@ -648,6 +1114,7 @@ fn redirect_found(location: &str) -> Response {
         .into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_index(
     state: &AppState,
     who: &Identity,
@@ -655,6 +1122,7 @@ fn render_index(
     filter: Filter,
     tag_view: Option<&str>,
     clips: &[Clip],
+    auto_archive: bool,
 ) -> String {
     // In a `?tag=` view the tabs are replaced by a "Tagged" banner with a clear-filter link.
     let tabs = match tag_view {
@@ -665,6 +1133,8 @@ fn render_index(
         ),
         None => render_tabs(filter),
     };
+    // The return-view token used by the bulk/settings forms so an action keeps the current tab.
+    let view = tag_view.map(|_| "all").unwrap_or_else(|| filter.as_str());
     INDEX_HTML
         .replace("{{CSS}}", APP_CSS)
         .replace("{{SHIELD}}", SHIELD_SVG)
@@ -675,23 +1145,70 @@ fn render_index(
             &esc(&bookmarklet_href(&state.config.public_base_url)),
         )
         .replace("{{TABS}}", &tabs)
+        .replace("{{TOOLBAR}}", &render_toolbar(csrf, view, auto_archive))
         .replace("{{LIST}}", &render_list(clips, csrf, filter, tag_view))
 }
 
-/// The All / Unread / Archived filter tabs.
+/// The all / unread / favorites / archive view tabs (canonical `?view=` links).
 fn render_tabs(active: Filter) -> String {
-    [(Filter::All, "All"), (Filter::Unread, "Unread"), (Filter::Archived, "Archived")]
-        .iter()
-        .map(|(f, label)| {
-            let cls = if *f == active { "tab tab--active" } else { "tab" };
-            format!(
-                "<a class=\"{cls}\" href=\"/?filter={f}\">{label}</a>",
-                f = f.as_str(),
-                label = label,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("")
+    [
+        (Filter::All, "All"),
+        (Filter::Unread, "Unread"),
+        (Filter::Favorites, "Favorites"),
+        (Filter::Archived, "Archive"),
+    ]
+    .iter()
+    .map(|(f, label)| {
+        let cls = if *f == active { "tab tab--active" } else { "tab" };
+        format!(
+            "<a class=\"{cls}\" href=\"/?view={f}\">{label}</a>",
+            f = f.as_str(),
+            label = label,
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("")
+}
+
+/// The list toolbar: the bulk-action form (whose submit buttons act on the checkboxes rendered in
+/// each clip via `form="bulkForm"`), the export links, and the per-owner auto-archive toggle. The
+/// bulk form is a SIBLING of the per-item forms (checkboxes are associated by id, never nested).
+fn render_toolbar(csrf: &str, view: &str, auto_archive: bool) -> String {
+    let checked = if auto_archive { " checked" } else { "" };
+    format!(
+        "<div class=\"listbar\">\
+           <form id=\"bulkForm\" class=\"bulkbar\" method=\"post\" action=\"/bulk\">\
+             <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+             <input type=\"hidden\" name=\"view\" value=\"{view}\">\
+             <label class=\"check\"><input type=\"checkbox\" id=\"bulkSelectAll\"><span>Select all</span></label>\
+             <input class=\"bulk-tags\" type=\"text\" name=\"tags\" placeholder=\"tags for Tag\" autocomplete=\"off\">\
+             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"archive\">Archive</button>\
+             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"favorite\">Favorite</button>\
+             <button class=\"btn btn-ghost btn-sm\" type=\"submit\" name=\"action\" value=\"tag\">Tag</button>\
+             <button class=\"btn btn-danger btn-sm\" type=\"submit\" name=\"action\" value=\"delete\" \
+                     onclick=\"return confirm('Delete the selected clips? This cannot be undone.');\">Delete</button>\
+           </form>\
+           <div class=\"listbar__right\">\
+             <form class=\"settingbar\" method=\"post\" action=\"/settings\">\
+               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+               <input type=\"hidden\" name=\"view\" value=\"{view}\">\
+               <label class=\"switch\"><input type=\"checkbox\" name=\"auto_archive\"{checked}><i></i></label>\
+               <span class=\"settingbar__label\">Archive on open</span>\
+               <button class=\"btn btn-ghost btn-sm\" type=\"submit\">Save</button>\
+             </form>\
+             <a class=\"btn btn-ghost btn-sm\" href=\"/export?format=md\">Export .md</a>\
+             <a class=\"btn btn-ghost btn-sm\" href=\"/export?format=json\">Export .json</a>\
+           </div>\
+         </div>\
+         <script>\
+           (function(){{var a=document.getElementById('bulkSelectAll');if(!a)return;\
+           a.addEventListener('change',function(){{document.querySelectorAll('input.bulk-check')\
+           .forEach(function(c){{c.checked=a.checked;}});}});}})();\
+         </script>",
+        csrf = esc(csrf),
+        view = esc(view),
+        checked = checked,
+    )
 }
 
 /// The reading-list items (already filtered/ordered by the store).
@@ -706,6 +1223,7 @@ fn render_list(clips: &[Clip], csrf: &str, filter: Filter, tag_view: Option<&str
             None => match filter {
                 Filter::All => "Your reading list is empty. Save a link to get started.",
                 Filter::Unread => "Nothing unread — you're all caught up.",
+                Filter::Favorites => "No favorites yet. Star a clip to keep it here.",
                 Filter::Archived => "No archived clips yet.",
             },
         };
@@ -713,7 +1231,7 @@ fn render_list(clips: &[Clip], csrf: &str, filter: Filter, tag_view: Option<&str
     }
     clips
         .iter()
-        .map(|c| render_clip_item(c, csrf, filter))
+        .map(|c| render_clip_item(c, csrf, filter, true))
         .collect::<Vec<_>>()
         .join("")
 }
@@ -754,17 +1272,31 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-fn render_clip_item(c: &Clip, csrf: &str, filter: Filter) -> String {
+/// Render one reading-list card. `selectable` adds the bulk-select checkbox (associated to
+/// `#bulkForm` by id) — the reading list sets it, the search results do not.
+fn render_clip_item(c: &Clip, csrf: &str, filter: Filter, selectable: bool) -> String {
     let title = display_title(c);
-    let status = if c.read {
+    let read_badge = if c.read {
         "<span class=\"badge badge--read\">Read</span>"
     } else {
         "<span class=\"badge badge--unread\">Unread</span>"
+    };
+    let fav_badge = if c.favorite {
+        "<span class=\"badge badge--fav\">★ Favorite</span>"
+    } else {
+        ""
     };
     let site = if c.site.trim().is_empty() {
         String::new()
     } else {
         format!("<span class=\"clip-site\">{}</span>", esc(&c.site))
+    };
+    // Reading-time estimate from the extracted text (word count / WPM).
+    let minutes = reading_minutes(word_count(&c.content_text));
+    let readtime = if minutes > 0 {
+        format!("<span class=\"clip-readtime\">{minutes} min read</span>")
+    } else {
+        String::new()
     };
     let excerpt = if c.excerpt.trim().is_empty() {
         String::new()
@@ -772,43 +1304,90 @@ fn render_clip_item(c: &Clip, csrf: &str, filter: Filter) -> String {
         format!("<p class=\"clip-excerpt\">{}</p>", esc(&c.excerpt))
     };
     let tags = render_tag_chips(&c.tags);
+    let progress = render_card_progress(c);
     let archive_label = if c.archived { "Unarchive" } else { "Archive" };
+    let fav_label = if c.favorite { "Unfavorite" } else { "Favorite" };
+    let view = filter.as_str();
+    // The bulk-select checkbox is a control associated with `#bulkForm` by the `form` attribute, so
+    // it is NEVER nested inside the per-item forms below.
+    let check = if selectable {
+        format!(
+            "<label class=\"clip-select\"><input class=\"bulk-check\" type=\"checkbox\" \
+             form=\"bulkForm\" name=\"ids\" value=\"{id}\"></label>",
+            id = esc(&c.id),
+        )
+    } else {
+        String::new()
+    };
 
     format!(
         "<li class=\"clip-item\">\
+           {check}\
            <div class=\"clip-main\">\
              <a class=\"clip-title\" href=\"/r/{id}\">{title}</a>\
-             <div class=\"clip-meta\">{status}{site}<span class=\"clip-time\">Saved {saved}</span></div>\
+             <div class=\"clip-meta\">{read_badge}{fav_badge}{site}{readtime}<span class=\"clip-time\">Saved {saved}</span></div>\
              {excerpt}\
+             {progress}\
              {tags}\
            </div>\
            <div class=\"clip-actions\">\
              <a class=\"btn btn-ghost btn-sm\" href=\"{url_attr}\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">Source</a>\
+             <form class=\"inline-form\" method=\"post\" action=\"/favorite/{id}\">\
+               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+               <input type=\"hidden\" name=\"view\" value=\"{view}\">\
+               <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{fav_label}</button>\
+             </form>\
              <form class=\"inline-form\" method=\"post\" action=\"/archive/{id}\">\
                <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
-               <input type=\"hidden\" name=\"filter\" value=\"{filter}\">\
+               <input type=\"hidden\" name=\"view\" value=\"{view}\">\
                <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{archive_label}</button>\
              </form>\
              <form class=\"inline-form\" method=\"post\" action=\"/delete/{id}\" \
                    onsubmit=\"return confirm('Delete this clip? This cannot be undone.');\">\
                <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
-               <input type=\"hidden\" name=\"filter\" value=\"{filter}\">\
+               <input type=\"hidden\" name=\"view\" value=\"{view}\">\
                <button class=\"btn btn-danger btn-sm\" type=\"submit\">Delete</button>\
              </form>\
            </div>\
          </li>",
+        check = check,
         id = esc(&c.id),
         title = esc(&title),
-        status = status,
+        read_badge = read_badge,
+        fav_badge = fav_badge,
         site = site,
+        readtime = readtime,
         saved = esc(&fmt_ts(c.saved_at)),
         excerpt = excerpt,
+        progress = progress,
         tags = tags,
         url_attr = esc(&c.url),
         csrf = esc(csrf),
-        filter = filter.as_str(),
+        view = esc(view),
+        fav_label = fav_label,
         archive_label = archive_label,
     )
+}
+
+/// Render the card's reading-progress affordance: a slim meter plus a "Continue reading" link when
+/// the owner is partway through (progress in `1..=99`); nothing at 0 and a "Finished" pill at 100.
+fn render_card_progress(c: &Clip) -> String {
+    let p = c.progress.clamp(0, 100);
+    if p <= 0 {
+        String::new()
+    } else if p >= 100 {
+        "<div class=\"clip-progress\"><span class=\"badge badge--read\">Finished</span></div>"
+            .to_string()
+    } else {
+        format!(
+            "<div class=\"clip-progress\">\
+               <span class=\"progress-meter\"><span class=\"progress-meter__fill\" style=\"width:{p}%\"></span></span>\
+               <a class=\"progress-continue\" href=\"/r/{id}\">Continue reading · {p}%</a>\
+             </div>",
+            p = p,
+            id = esc(&c.id),
+        )
+    }
 }
 
 fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highlight]) -> String {
@@ -819,8 +1398,27 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
         clip.site.clone()
     };
     let read_state = if clip.read { "Read" } else { "Unread" };
-    let meta = format!("{site} · Saved {saved} · {read_state}", saved = fmt_ts(clip.saved_at));
+    let minutes = reading_minutes(word_count(&clip.content_text));
+    let readtime = if minutes > 0 {
+        format!(" · {minutes} min read")
+    } else {
+        String::new()
+    };
+    let meta = format!(
+        "{site} · Saved {saved}{readtime} · {read_state}",
+        saved = fmt_ts(clip.saved_at),
+    );
 
+    let favorite_label = if clip.favorite { "Unfavorite" } else { "Favorite" };
+    let favorite_form = format!(
+        "<form class=\"inline-form\" method=\"post\" action=\"/favorite/{id}\">\
+           <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+           <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{label}</button>\
+         </form>",
+        id = esc(&clip.id),
+        csrf = esc(csrf),
+        label = favorite_label,
+    );
     let archive_label = if clip.archived { "Unarchive" } else { "Archive" };
     let archive_form = format!(
         "<form class=\"inline-form\" method=\"post\" action=\"/archive/{id}\">\
@@ -849,11 +1447,44 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
         .replace("{{META}}", &esc(&meta))
         .replace("{{URL_ATTR}}", &esc(&clip.url))
         .replace("{{URL_TEXT}}", &esc(&clip.url))
+        .replace("{{FAVORITE}}", &favorite_form)
         .replace("{{ARCHIVE}}", &archive_form)
         .replace("{{DELETE}}", &delete_form)
         .replace("{{TAGS}}", &render_tags_editor(clip, csrf))
         .replace("{{CONTENT}}", &render_content(&clip.content_text))
         .replace("{{HIGHLIGHTS}}", &render_highlights_margin(clip, csrf, highlights))
+        .replace("{{PROGRESS}}", &render_reader_progress(clip, csrf))
+}
+
+/// The reader's progress plumbing: a data holder carrying the clip id, CSRF token and saved percent
+/// plus the throttled scroll reporter. On load it best-effort resumes near the saved fraction; while
+/// scrolling it POSTs the clamped percent to `/progress/{id}`. All dynamic values are escaped into
+/// `data-*` attributes; the script reads them via `dataset`, never interpolating remote text.
+fn render_reader_progress(clip: &Clip, csrf: &str) -> String {
+    format!(
+        "<div id=\"readerProgress\" data-id=\"{id}\" data-csrf=\"{csrf}\" data-progress=\"{progress}\"></div>\
+         <script>\
+         (function(){{\
+           var el=document.getElementById('readerProgress');if(!el)return;\
+           var id=el.dataset.id,csrf=el.dataset.csrf;\
+           var start=parseInt(el.dataset.progress,10)||0;var last=start;var pending=false;\
+           function docPct(){{var h=document.documentElement.scrollHeight-window.innerHeight;\
+             if(h<=0)return 0;var p=Math.round(window.scrollY/h*100);return p<0?0:(p>100?100:p);}}\
+           if(start>0&&start<100){{window.addEventListener('load',function(){{\
+             var h=document.documentElement.scrollHeight-window.innerHeight;\
+             if(h>0)window.scrollTo(0,Math.round(h*start/100));}});}}\
+           function report(){{pending=false;var p=docPct();if(Math.abs(p-last)<2)return;last=p;\
+             var body='csrf_token='+encodeURIComponent(csrf)+'&progress='+p;\
+             fetch('/progress/'+encodeURIComponent(id),{{method:'POST',credentials:'same-origin',\
+               keepalive:true,headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:body}});}}\
+           window.addEventListener('scroll',function(){{if(pending)return;pending=true;\
+             setTimeout(report,1500);}},{{passive:true}});\
+         }})();\
+         </script>",
+        id = esc(&clip.id),
+        csrf = esc(csrf),
+        progress = clip.progress.clamp(0, 100),
+    )
 }
 
 /// The reader's highlights margin: the add-a-highlight form (quote + optional note) followed by
@@ -1041,7 +1672,7 @@ fn render_search(
     } else {
         results
             .iter()
-            .map(|c| render_clip_item(c, csrf, Filter::All))
+            .map(|c| render_clip_item(c, csrf, Filter::All, false))
             .collect::<Vec<_>>()
             .join("")
     };

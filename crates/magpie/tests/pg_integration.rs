@@ -34,6 +34,8 @@ fn clip(id: &str, owner: &str, url: &str, saved_at: i64) -> Clip {
         saved_at,
         read: false,
         archived: false,
+        favorite: false,
+        progress: 0,
         tags: None,
     }
 }
@@ -191,7 +193,35 @@ async fn pg_store_full_integration() {
     assert!(store.delete_highlight("hl000001", "alice").await.unwrap());
     assert!(store.get_highlight("hl000001").await.unwrap().is_none());
 
+    // --- favorite + progress: persist, filter, owner-scope --------------------
+    // alice owns bbbbbb22 (now+10) and cccccc33 (now+20), both non-archived.
+    assert!(store.set_favorite("bbbbbb22", "alice", true).await.unwrap());
+    assert!(!store.set_favorite("bbbbbb22", "bob", false).await.unwrap()); // owner-scoped
+    let favs = store.list("alice", Filter::Favorites).await.unwrap();
+    assert_eq!(favs.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["bbbbbb22"]);
+    assert!(store.set_progress("cccccc33", "alice", 55).await.unwrap());
+    assert!(!store.set_progress("cccccc33", "bob", 99).await.unwrap()); // owner-scoped
+    assert_eq!(store.get("cccccc33").await.unwrap().unwrap().progress, 55);
+    assert!(store.get("bbbbbb22").await.unwrap().unwrap().favorite);
+
+    // --- export: every status, owner-scoped; highlights grouped by clip -------
+    let ex = store.export_clips("alice", 100).await.unwrap();
+    // newest-first: cccccc33 (now+20) before bbbbbb22 (now+10); bob excluded.
+    assert_eq!(ex.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["cccccc33", "bbbbbb22"]);
+    let exh = store.export_highlights("alice", 100).await.unwrap();
+    // grouped by clip_id ASC: bbbbbb22's hl000002 then cccccc33's hl000003; bob's hl000004 excluded.
+    assert_eq!(exh.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["hl000002", "hl000003"]);
+
+    // --- prefs: auto-archive defaults off, persists, owner-scoped -------------
+    assert!(!store.get_auto_archive("alice").await.unwrap());
+    store.set_auto_archive("alice", true).await.unwrap();
+    assert!(store.get_auto_archive("alice").await.unwrap());
+    assert!(!store.get_auto_archive("bob").await.unwrap());
+    store.set_auto_archive("alice", false).await.unwrap(); // upsert path
+    assert!(!store.get_auto_archive("alice").await.unwrap());
+
     sqlx::query("DELETE FROM highlights").execute(&raw).await.unwrap();
     sqlx::query("DELETE FROM clips").execute(&raw).await.unwrap();
+    sqlx::query("DELETE FROM prefs").execute(&raw).await.unwrap();
     eprintln!("pg_integration test passed.");
 }

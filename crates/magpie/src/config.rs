@@ -15,6 +15,13 @@ pub const DEFAULT_PUBLIC_BASE_URL: &str = "https://clip.w33d.xyz";
 /// How many of an owner's clips a reading-list view shows.
 pub const LIST_LIMIT: usize = 200;
 
+/// How many rows a full export walks (clips and, separately, highlights). Higher than the
+/// reading-list page cap so an export is reasonably complete, but still bounded.
+pub const EXPORT_LIMIT: usize = 10_000;
+
+/// Hard cap on how many clip ids a single bulk action will touch (bounds a pathological POST).
+pub const MAX_BULK_IDS: usize = 500;
+
 /// Default page size for the keyset-paginated search results.
 pub const DEFAULT_PAGE: usize = 25;
 

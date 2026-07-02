@@ -78,8 +78,29 @@ pub trait Store: Send + Sync {
         archived: bool,
     ) -> Result<bool, StoreError>;
 
+    /// Set the favorite (starred) flag on an owner's clip. Returns `true` when a row was updated.
+    async fn set_favorite(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        favorite: bool,
+    ) -> Result<bool, StoreError>;
+
+    /// Store an owner's reading-progress percent for a clip. `progress` is assumed already clamped
+    /// to `[0, 100]` by the caller. Returns `true` when a row was updated.
+    async fn set_progress(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        progress: i64,
+    ) -> Result<bool, StoreError>;
+
     /// Delete an owner's clip. Returns `true` when a row was removed (existed AND owned).
     async fn delete(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
+
+    /// Every one of an owner's clips (any status), newest-first, capped at `limit` — the source
+    /// for the full export. Owner-scoped like every other read.
+    async fn export_clips(&self, owner_sub: &str, limit: usize) -> Result<Vec<Clip>, StoreError>;
 
     // ---- highlights ------------------------------------------------------------------
 
@@ -119,8 +140,24 @@ pub trait Store: Send + Sync {
     /// All of an owner's highlights across every clip, newest-first, capped at [`LIST_LIMIT`].
     async fn list_all_highlights(&self, owner_sub: &str) -> Result<Vec<Highlight>, StoreError>;
 
+    /// Every one of an owner's highlights (any clip), grouped-friendly order `(clip_id, created_at)`
+    /// ascending, capped at `limit` — the source for the full export.
+    async fn export_highlights(
+        &self,
+        owner_sub: &str,
+        limit: usize,
+    ) -> Result<Vec<Highlight>, StoreError>;
+
     /// Delete an owner's highlight. Returns `true` when a row was removed (existed AND owned).
     async fn delete_highlight(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
+
+    // ---- per-owner preferences -------------------------------------------------------
+
+    /// Whether reading a clip should auto-archive it for this owner (default `false`).
+    async fn get_auto_archive(&self, owner_sub: &str) -> Result<bool, StoreError>;
+
+    /// Set the owner's auto-archive-on-read preference (idempotent upsert).
+    async fn set_auto_archive(&self, owner_sub: &str, on: bool) -> Result<(), StoreError>;
 }
 
 // --------------------------------------------------------------------------------------
@@ -133,6 +170,8 @@ pub trait Store: Send + Sync {
 pub struct InMemoryStore {
     clips: Mutex<Vec<Clip>>,
     highlights: Mutex<Vec<Highlight>>,
+    /// Per-owner preferences: `(owner_sub, auto_archive_on_read)`.
+    prefs: Mutex<Vec<(String, bool)>>,
 }
 
 impl InMemoryStore {
@@ -280,11 +319,61 @@ impl Store for InMemoryStore {
         }
     }
 
+    async fn set_favorite(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        favorite: bool,
+    ) -> Result<bool, StoreError> {
+        let mut clips = self.clips.lock().expect("clips lock poisoned");
+        match clips
+            .iter_mut()
+            .find(|c| c.id == id && c.owner_sub == owner_sub)
+        {
+            Some(c) => {
+                c.favorite = favorite;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn set_progress(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        progress: i64,
+    ) -> Result<bool, StoreError> {
+        let mut clips = self.clips.lock().expect("clips lock poisoned");
+        match clips
+            .iter_mut()
+            .find(|c| c.id == id && c.owner_sub == owner_sub)
+        {
+            Some(c) => {
+                c.progress = progress;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     async fn delete(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
         let mut clips = self.clips.lock().expect("clips lock poisoned");
         let before = clips.len();
         clips.retain(|c| !(c.id == id && c.owner_sub == owner_sub));
         Ok(clips.len() != before)
+    }
+
+    async fn export_clips(&self, owner_sub: &str, limit: usize) -> Result<Vec<Clip>, StoreError> {
+        let clips = self.clips.lock().expect("clips lock poisoned");
+        let mut out: Vec<Clip> = clips
+            .iter()
+            .filter(|c| c.owner_sub == owner_sub)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.id.cmp(&a.id)));
+        out.truncate(limit);
+        Ok(out)
     }
 
     async fn add_highlight(&self, highlight: &Highlight) -> Result<bool, StoreError> {
@@ -364,11 +453,51 @@ impl Store for InMemoryStore {
         Ok(out)
     }
 
+    async fn export_highlights(
+        &self,
+        owner_sub: &str,
+        limit: usize,
+    ) -> Result<Vec<Highlight>, StoreError> {
+        let hs = self.highlights.lock().expect("highlights lock poisoned");
+        let mut out: Vec<Highlight> = hs
+            .iter()
+            .filter(|h| h.owner_sub == owner_sub)
+            .cloned()
+            .collect();
+        // Group-friendly: by clip, then reading order within a clip.
+        out.sort_by(|a, b| {
+            a.clip_id
+                .cmp(&b.clip_id)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out.truncate(limit);
+        Ok(out)
+    }
+
     async fn delete_highlight(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
         let mut hs = self.highlights.lock().expect("highlights lock poisoned");
         let before = hs.len();
         hs.retain(|h| !(h.id == id && h.owner_sub == owner_sub));
         Ok(hs.len() != before)
+    }
+
+    async fn get_auto_archive(&self, owner_sub: &str) -> Result<bool, StoreError> {
+        let prefs = self.prefs.lock().expect("prefs lock poisoned");
+        Ok(prefs
+            .iter()
+            .find(|(o, _)| o == owner_sub)
+            .map(|(_, v)| *v)
+            .unwrap_or(false))
+    }
+
+    async fn set_auto_archive(&self, owner_sub: &str, on: bool) -> Result<(), StoreError> {
+        let mut prefs = self.prefs.lock().expect("prefs lock poisoned");
+        match prefs.iter_mut().find(|(o, _)| o == owner_sub) {
+            Some(entry) => entry.1 = on,
+            None => prefs.push((owner_sub.to_string(), on)),
+        }
+        Ok(())
     }
 }
 
@@ -384,8 +513,8 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
 
 /// Column list shared by every SELECT, so the row decoder stays in lock-step with the query.
-const COLS: &str =
-    "id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived, tags";
+const COLS: &str = "id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, \
+     archived, favorite, progress, tags";
 
 /// Column list shared by every highlight SELECT, so the row decoder stays in lock-step.
 const HL_COLS: &str = "id, clip_id, owner_sub, quote, note, created_at";
@@ -442,6 +571,14 @@ impl PgStore {
         sqlx::query("ALTER TABLE clips ADD COLUMN IF NOT EXISTS tags TEXT")
             .execute(&self.pool)
             .await?;
+        // The favorite (starred) flag + the reading-progress percent. Both additive, idempotent,
+        // portable standard SQL with NOT NULL defaults so existing rows backfill cleanly.
+        sqlx::query("ALTER TABLE clips ADD COLUMN IF NOT EXISTS favorite BOOLEAN NOT NULL DEFAULT FALSE")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE clips ADD COLUMN IF NOT EXISTS progress BIGINT NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_clips_owner_saved \
              ON clips (owner_sub, saved_at)",
@@ -480,6 +617,16 @@ impl PgStore {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_highlights_owner_created \
              ON highlights (owner_sub, created_at)",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Per-owner preferences (one row per owner). Portable standard SQL (TEXT PRIMARY KEY +
+        // BOOLEAN with a default) — safe to re-run on every boot.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS prefs (\
+                 owner_sub TEXT PRIMARY KEY, \
+                 auto_archive BOOLEAN NOT NULL DEFAULT FALSE\
+             )",
         )
         .execute(&self.pool)
         .await?;
@@ -615,6 +762,8 @@ impl PgStore {
             saved_at: row.try_get("saved_at")?,
             read: row.try_get("read")?,
             archived: row.try_get("archived")?,
+            favorite: row.try_get("favorite")?,
+            progress: row.try_get("progress")?,
             tags: row.try_get("tags")?,
         })
     }
@@ -624,8 +773,8 @@ impl PgStore {
         // retries with a fresh id. This is the single, race-free insert path.
         let result = sqlx::query(
             "INSERT INTO clips \
-                 (id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived, tags) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+                 (id, owner_sub, url, title, excerpt, content_text, site, saved_at, read, archived, favorite, progress, tags) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(&clip.id)
@@ -638,6 +787,8 @@ impl PgStore {
         .bind(clip.saved_at)
         .bind(clip.read)
         .bind(clip.archived)
+        .bind(clip.favorite)
+        .bind(clip.progress)
         .bind(&clip.tags)
         .execute(&self.pool)
         .await?;
@@ -672,6 +823,7 @@ impl PgStore {
         let predicate = match filter {
             Filter::All => "archived = FALSE",
             Filter::Unread => "archived = FALSE AND read = FALSE",
+            Filter::Favorites => "favorite = TRUE",
             Filter::Archived => "archived = TRUE",
         };
         let rows = sqlx::query(&format!(
@@ -785,6 +937,38 @@ impl PgStore {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn set_favorite_async(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        favorite: bool,
+    ) -> Result<bool, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE clips SET favorite = $3 WHERE id = $1 AND owner_sub = $2")
+                .bind(id)
+                .bind(owner_sub)
+                .bind(favorite)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_progress_async(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        progress: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE clips SET progress = $3 WHERE id = $1 AND owner_sub = $2")
+                .bind(id)
+                .bind(owner_sub)
+                .bind(progress)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn delete_async(&self, id: &str, owner_sub: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM clips WHERE id = $1 AND owner_sub = $2")
             .bind(id)
@@ -792,6 +976,64 @@ impl PgStore {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn export_clips_async(
+        &self,
+        owner_sub: &str,
+        limit: usize,
+    ) -> Result<Vec<Clip>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {COLS} FROM clips \
+             WHERE owner_sub = $1 \
+             ORDER BY saved_at DESC, id DESC LIMIT $2"
+        ))
+        .bind(owner_sub)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::clip_from_row).collect()
+    }
+
+    async fn export_highlights_async(
+        &self,
+        owner_sub: &str,
+        limit: usize,
+    ) -> Result<Vec<Highlight>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {HL_COLS} FROM highlights \
+             WHERE owner_sub = $1 \
+             ORDER BY clip_id ASC, created_at ASC, id ASC LIMIT $2"
+        ))
+        .bind(owner_sub)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::highlight_from_row).collect()
+    }
+
+    async fn get_auto_archive_async(&self, owner_sub: &str) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query("SELECT auto_archive FROM prefs WHERE owner_sub = $1")
+            .bind(owner_sub)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some(r) => r.try_get("auto_archive")?,
+            None => false,
+        })
+    }
+
+    async fn set_auto_archive_async(&self, owner_sub: &str, on: bool) -> Result<(), sqlx::Error> {
+        // Idempotent upsert on the owner key.
+        sqlx::query(
+            "INSERT INTO prefs (owner_sub, auto_archive) VALUES ($1, $2) \
+             ON CONFLICT (owner_sub) DO UPDATE SET auto_archive = $2",
+        )
+        .bind(owner_sub)
+        .bind(on)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
 
@@ -871,8 +1113,36 @@ impl Store for PgStore {
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    async fn set_favorite(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        favorite: bool,
+    ) -> Result<bool, StoreError> {
+        self.set_favorite_async(id, owner_sub, favorite)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn set_progress(
+        &self,
+        id: &str,
+        owner_sub: &str,
+        progress: i64,
+    ) -> Result<bool, StoreError> {
+        self.set_progress_async(id, owner_sub, progress)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     async fn delete(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
         self.delete_async(id, owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn export_clips(&self, owner_sub: &str, limit: usize) -> Result<Vec<Clip>, StoreError> {
+        self.export_clips_async(owner_sub, limit)
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
@@ -927,8 +1197,30 @@ impl Store for PgStore {
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    async fn export_highlights(
+        &self,
+        owner_sub: &str,
+        limit: usize,
+    ) -> Result<Vec<Highlight>, StoreError> {
+        self.export_highlights_async(owner_sub, limit)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     async fn delete_highlight(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
         self.delete_highlight_async(id, owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn get_auto_archive(&self, owner_sub: &str) -> Result<bool, StoreError> {
+        self.get_auto_archive_async(owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn set_auto_archive(&self, owner_sub: &str, on: bool) -> Result<(), StoreError> {
+        self.set_auto_archive_async(owner_sub, on)
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
@@ -950,6 +1242,8 @@ mod tests {
             saved_at,
             read: false,
             archived: false,
+            favorite: false,
+            progress: 0,
             tags: None,
         }
     }
@@ -1117,9 +1411,53 @@ mod tests {
         s.create(&clip("a", "u", "https://x", 1)).await.unwrap();
         assert!(!s.mark_read("a", "intruder").await.unwrap());
         assert!(!s.set_archived("a", "intruder", true).await.unwrap());
+        assert!(!s.set_favorite("a", "intruder", true).await.unwrap());
+        assert!(!s.set_progress("a", "intruder", 50).await.unwrap());
         assert!(!s.delete("a", "intruder").await.unwrap());
         assert!(s.get("a").await.unwrap().is_some());
         assert!(s.delete("a", "u").await.unwrap());
         assert!(s.get("a").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn favorite_and_progress_persist_and_filter() {
+        let s = InMemoryStore::new();
+        s.create(&clip("a", "u", "https://a", 10)).await.unwrap();
+        s.create(&clip("b", "u", "https://b", 20)).await.unwrap();
+        // Star b and archive it — it must still surface in the Favorites view.
+        assert!(s.set_favorite("b", "u", true).await.unwrap());
+        assert!(s.set_archived("b", "u", true).await.unwrap());
+        let favs = s.list("u", Filter::Favorites).await.unwrap();
+        assert_eq!(favs.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["b"]);
+        // Progress persists and is read back verbatim (clamping happens in the handler).
+        assert!(s.set_progress("a", "u", 42).await.unwrap());
+        assert_eq!(s.get("a").await.unwrap().unwrap().progress, 42);
+        // Un-favorite empties the view.
+        assert!(s.set_favorite("b", "u", false).await.unwrap());
+        assert!(s.list("u", Filter::Favorites).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn export_clips_returns_every_status_owner_scoped() {
+        let s = InMemoryStore::new();
+        s.create(&clip("a", "u", "https://a", 10)).await.unwrap();
+        s.create(&clip("b", "u", "https://b", 20)).await.unwrap();
+        s.set_archived("b", "u", true).await.unwrap();
+        s.create(&clip("c", "other", "https://c", 30)).await.unwrap();
+        let mine = s.export_clips("u", 100).await.unwrap();
+        // Archived + active both included, newest-first; the other owner is excluded.
+        assert_eq!(mine.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+    }
+
+    #[tokio::test]
+    async fn auto_archive_pref_defaults_off_and_persists() {
+        let s = InMemoryStore::new();
+        assert!(!s.get_auto_archive("u").await.unwrap());
+        s.set_auto_archive("u", true).await.unwrap();
+        assert!(s.get_auto_archive("u").await.unwrap());
+        // Scoped per owner.
+        assert!(!s.get_auto_archive("other").await.unwrap());
+        s.set_auto_archive("u", false).await.unwrap();
+        assert!(!s.get_auto_archive("u").await.unwrap());
     }
 }

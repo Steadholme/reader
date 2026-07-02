@@ -30,6 +30,13 @@ pub struct Clip {
     pub read: bool,
     /// Whether the owner archived it (removed from the active reading list).
     pub archived: bool,
+    /// Whether the owner starred it. A favorite is ORTHOGONAL to read/archived (Pocket-style): a
+    /// clip can be read, archived AND favorite at once. Backed by a `BOOLEAN NOT NULL DEFAULT FALSE`
+    /// column added idempotently.
+    pub favorite: bool,
+    /// Last saved reading progress as an integer percent, always clamped to `[0, 100]` on write
+    /// (0 = not started). Backed by a `BIGINT NOT NULL DEFAULT 0` column added idempotently.
+    pub progress: i64,
     /// Owner-supplied tags, normalized to a lowercase comma-separated list (e.g. `rust,web`).
     /// `None` when the owner set none — the column is a NULLABLE TEXT (never an array/JSON).
     pub tags: Option<String>,
@@ -60,34 +67,41 @@ pub struct Highlight {
     pub created_at: i64,
 }
 
-/// Reading-list filter. `All` and `Unread` show only NON-archived clips; `Archived` shows the
-/// archive. Keeping this as a closed enum means both stores agree on what each view contains.
+/// Reading-list view. `All` and `Unread` show only NON-archived clips; `Favorites` shows every
+/// starred clip; `Archived` shows the archive. Keeping this a closed enum means both stores agree
+/// on what each view contains. The canonical query key is `?view=`; the legacy `?filter=` alias
+/// (and the legacy `archived` token) are still accepted by [`Filter::parse`] for compatibility.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
     /// Active list: every non-archived clip (read + unread).
     All,
     /// Active list, unread only.
     Unread,
+    /// Every starred clip (any read/archived state).
+    Favorites,
     /// The archive.
     Archived,
 }
 
 impl Filter {
-    /// Parse a `?filter=` token; anything unrecognized (incl. missing) is the default [`Filter::All`].
+    /// Parse a `?view=` (or legacy `?filter=`) token; anything unrecognized (incl. missing) is the
+    /// default [`Filter::All`]. Both `archive` and the legacy `archived` map to the archive.
     pub fn parse(token: &str) -> Filter {
         match token {
             "unread" => Filter::Unread,
-            "archived" => Filter::Archived,
+            "favorites" | "favorite" => Filter::Favorites,
+            "archive" | "archived" => Filter::Archived,
             _ => Filter::All,
         }
     }
 
-    /// The canonical query token for this filter (round-trips with [`Filter::parse`]).
+    /// The canonical query token for this view (round-trips with [`Filter::parse`]).
     pub fn as_str(self) -> &'static str {
         match self {
             Filter::All => "all",
             Filter::Unread => "unread",
-            Filter::Archived => "archived",
+            Filter::Favorites => "favorites",
+            Filter::Archived => "archive",
         }
     }
 
@@ -97,9 +111,34 @@ impl Filter {
         match self {
             Filter::All => !clip.archived,
             Filter::Unread => !clip.archived && !clip.read,
+            Filter::Favorites => clip.favorite,
             Filter::Archived => clip.archived,
         }
     }
+}
+
+/// Words-per-minute rate for the reading-time estimate shown on cards and the reader.
+pub const WORDS_PER_MINUTE: usize = 200;
+
+/// Count whitespace-delimited words in `text` (the basis for the reading-time estimate).
+pub fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// Estimated reading time in whole minutes for `words` words at [`WORDS_PER_MINUTE`]. Zero words is
+/// zero minutes; any content rounds UP to at least one minute (ceiling division).
+pub fn reading_minutes(words: usize) -> usize {
+    if words == 0 {
+        0
+    } else {
+        words.div_ceil(WORDS_PER_MINUTE)
+    }
+}
+
+/// Clamp a raw, client-supplied reading-progress percent into the stored `[0, 100]` range. Every
+/// write goes through this so a bogus POST can never store an out-of-range value.
+pub fn clamp_progress(pct: i64) -> i64 {
+    pct.clamp(0, 100)
 }
 
 /// Normalize a raw, owner-typed tag string into the stored canonical form: split on commas, trim,
@@ -124,9 +163,8 @@ pub fn normalize_tags(raw: &str) -> Option<String> {
     let mut joined = out.join(",");
     // Defensive cap so a pathological submission can never bloat the row.
     if joined.chars().count() > MAX_TAGS_CHARS {
-        match joined.char_indices().nth(MAX_TAGS_CHARS) {
-            Some((idx, _)) => joined.truncate(idx),
-            None => {}
+        if let Some((idx, _)) = joined.char_indices().nth(MAX_TAGS_CHARS) {
+            joined.truncate(idx);
         }
     }
     Some(joined)
@@ -195,15 +233,20 @@ mod tests {
             saved_at: 1,
             read,
             archived,
+            favorite: false,
+            progress: 0,
             tags: None,
         }
     }
 
     #[test]
     fn filter_parse_round_trips() {
-        for f in [Filter::All, Filter::Unread, Filter::Archived] {
+        for f in [Filter::All, Filter::Unread, Filter::Favorites, Filter::Archived] {
             assert_eq!(Filter::parse(f.as_str()), f);
         }
+        // Legacy aliases still resolve.
+        assert_eq!(Filter::parse("archived"), Filter::Archived);
+        assert_eq!(Filter::parse("favorite"), Filter::Favorites);
         assert_eq!(Filter::parse("bogus"), Filter::All);
         assert_eq!(Filter::parse(""), Filter::All);
     }
@@ -220,6 +263,33 @@ mod tests {
         // Archived: archived only.
         assert!(Filter::Archived.matches(&clip(false, true)));
         assert!(!Filter::Archived.matches(&clip(false, false)));
+        // Favorites: starred only, regardless of read/archived.
+        let mut fav = clip(true, true);
+        fav.favorite = true;
+        assert!(Filter::Favorites.matches(&fav));
+        assert!(!Filter::Favorites.matches(&clip(false, false)));
+    }
+
+    #[test]
+    fn reading_minutes_ceils_and_floors_at_zero() {
+        assert_eq!(reading_minutes(0), 0);
+        assert_eq!(reading_minutes(1), 1);
+        assert_eq!(reading_minutes(200), 1);
+        assert_eq!(reading_minutes(201), 2);
+        assert_eq!(reading_minutes(400), 2);
+        assert_eq!(reading_minutes(401), 3);
+        // word_count is the whitespace split feeding it.
+        assert_eq!(word_count("  one   two\tthree\n"), 3);
+        assert_eq!(word_count(""), 0);
+    }
+
+    #[test]
+    fn clamp_progress_bounds_to_0_100() {
+        assert_eq!(clamp_progress(-5), 0);
+        assert_eq!(clamp_progress(0), 0);
+        assert_eq!(clamp_progress(37), 37);
+        assert_eq!(clamp_progress(100), 100);
+        assert_eq!(clamp_progress(1000), 100);
     }
 
     #[test]

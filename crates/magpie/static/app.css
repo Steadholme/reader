@@ -482,3 +482,29 @@ hr { border:none; border-top:1px solid var(--border); margin:20px 0; }
   .reader-layout { grid-template-columns: 1fr; }
   .reader-margin { position: static; }
 }
+
+/* ---- Clips: status / bulk / progress / export (wave-4) ------------------- */
+.badge--fav { background: var(--warn-soft); color: var(--warn-ink); border-color: var(--warn-border, var(--border)); }
+.clip-select { flex: none; display: flex; align-items: flex-start; padding-top: 2px; }
+.clip-select input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+.clip-readtime { color: var(--ink-3); }
+.clip-progress { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.progress-meter { position: relative; flex: 0 0 120px; height: 6px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; }
+.progress-meter__fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: var(--r-pill); }
+.progress-continue { font-size: 12.5px; font-weight: 550; color: var(--accent-ink); }
+.progress-continue:hover { color: var(--accent); }
+
+/* Reading-list toolbar: bulk actions (left) + export/settings (right). */
+.listbar {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 0 0 14px; padding: 10px 12px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--r);
+}
+.bulkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
+.bulk-tags {
+  height: 32px; padding: 0 10px; font: inherit; font-size: 13px; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm); min-width: 150px;
+}
+.listbar__right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.settingbar { display: flex; align-items: center; gap: 8px; margin: 0; }
+.settingbar__label { font-size: 13px; color: var(--ink-2); }
