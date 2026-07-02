@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::activitypub::{self, ACTIVITY_JSON};
 use crate::audit::AuditEvent;
-use crate::store::{Follower, HomeNote};
+use crate::store::{Follower, HomeNote, Notification};
 use crate::{federation, httpsig, now_nanos, now_secs, AppState};
 
 /// Build an `application/activity+json` 200 response from a JSON value.
@@ -41,7 +41,10 @@ fn is_our_actor(state: &AppState, name: &str) -> bool {
 }
 
 /// `GET /.well-known/webfinger?resource=acct:<actor>@<domain>` — resolve the handle to the actor.
-pub async fn webfinger(State(state): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Response {
+pub async fn webfinger(
+    State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     let Some(resource) = q.get("resource") else {
         return plain(StatusCode::BAD_REQUEST, "missing resource parameter");
     };
@@ -60,7 +63,11 @@ pub async fn actor(State(state): State<AppState>, Path(name): Path<String>) -> R
         return plain(StatusCode::NOT_FOUND, "no such actor");
     }
     let profile = state.store.get_profile().await;
-    activity_json(activitypub::actor(&state.config, &state.signer.public_pem, &profile))
+    activity_json(activitypub::actor(
+        &state.config,
+        &state.signer.public_pem,
+        &profile,
+    ))
 }
 
 /// `GET /users/{name}/outbox` — OrderedCollection of public notes (Create activities).
@@ -89,7 +96,11 @@ pub async fn followers(State(state): State<AppState>, Path(name): Path<String>) 
     }
     let list = state.store.list_followers().await;
     let total = state.store.count_followers().await;
-    activity_json(activitypub::followers_collection(&state.config, &list, total))
+    activity_json(activitypub::followers_collection(
+        &state.config,
+        &list,
+        total,
+    ))
 }
 
 /// `GET /users/{name}/notes/{id}` — a dereferenceable Note object.
@@ -139,10 +150,17 @@ pub async fn shared_inbox(
 /// (verified against the sender's fetched public key) or it is rejected `401`. Otherwise always
 /// answers `202 Accepted` for well-formed activities; `400` only when the body is not parseable
 /// JSON. Side effects (Accept delivery) are spawned, never awaited.
-async fn handle_inbox(state: AppState, target: String, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle_inbox(
+    state: AppState,
+    target: String,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     // The federation gate: verify the draft-cavage HTTP Signature before trusting the activity.
     if state.config.verify_inbox {
-        if let Err(reason) = httpsig::verify_inbound(&state.http, &headers, "post", &target, &body).await {
+        if let Err(reason) =
+            httpsig::verify_inbound(&state.http, &headers, "post", &target, &body).await
+        {
             tracing::warn!(%reason, "inbox signature verification failed — rejecting 401");
             return plain(StatusCode::UNAUTHORIZED, "invalid HTTP signature");
         }
@@ -183,6 +201,7 @@ async fn handle_inbox(state: AppState, target: String, headers: HeaderMap, body:
                 &state.config.actor_url(),
                 "follow",
             ));
+            notify_known_owners(&state, "follow", &follower, "").await;
             if state.config.federate {
                 tokio::spawn(federation::accept_follow(
                     state.http.clone(),
@@ -213,8 +232,12 @@ async fn handle_inbox(state: AppState, target: String, headers: HeaderMap, body:
             // A Note delivered by a remote WE follow lands in the home timeline. Notes from anyone
             // else are accepted (per spec) but not recorded — the home view is our follows only.
             if let Some(sender) = actor_id(&activity) {
+                let parsed = home_note_from_create(&sender, &activity);
+                if let Some(home) = &parsed {
+                    notify_for_create(&state, &sender, home, &activity).await;
+                }
                 if state.store.is_following(&sender).await {
-                    if let Some(home) = home_note_from_create(&sender, &activity) {
+                    if let Some(home) = parsed {
                         let id = home.id.clone();
                         if let Err(e) = state.store.add_home_note(&home).await {
                             tracing::warn!(error = %e, "failed to record home note");
@@ -231,7 +254,20 @@ async fn handle_inbox(state: AppState, target: String, headers: HeaderMap, body:
             }
             accepted()
         }
-        // Like / Announce / … are accepted best-effort but not stored in v1.
+        "Announce" => {
+            if let Some(sender) = actor_id(&activity) {
+                if let Some(note_uri) = object_id(activity.get("object")) {
+                    if let Some(local_id) = local_note_id(&state, &note_uri) {
+                        if let Some(note) = state.store.get_note(&local_id).await {
+                            add_notification(&state, &note.author_sub, "boost", &sender, &note_uri)
+                                .await;
+                        }
+                    }
+                }
+            }
+            accepted()
+        }
+        // Like / … are accepted best-effort but not stored in v1.
         _ => accepted(),
     }
 }
@@ -244,8 +280,15 @@ fn home_note_from_create(sender: &str, activity: &Value) -> Option<HomeNote> {
     if obj.get("type").and_then(Value::as_str) != Some("Note") {
         return None;
     }
-    let id = obj.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())?;
-    let content = obj.get("content").and_then(Value::as_str).unwrap_or("").to_string();
+    let id = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    let content = obj
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let url = obj
         .get("url")
         .and_then(Value::as_str)
@@ -258,20 +301,129 @@ fn home_note_from_create(sender: &str, activity: &Value) -> Option<HomeNote> {
         .and_then(Value::as_str)
         .and_then(parse_rfc3339_secs)
         .unwrap_or(0);
+    let in_reply_to = object_id(obj.get("inReplyTo")).unwrap_or_default();
     Some(HomeNote {
         id: id.to_string(),
         actor: sender.to_string(),
         content,
         url,
         published,
+        in_reply_to,
         received_at: now_secs(),
     })
+}
+
+async fn notify_for_create(state: &AppState, sender: &str, home: &HomeNote, activity: &Value) {
+    let mut notified: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if let Some(local_id) = local_note_id(state, &home.in_reply_to) {
+        if let Some(note) = state.store.get_note(&local_id).await {
+            add_notification(state, &note.author_sub, "reply", sender, &home.id).await;
+            notified.insert(note.author_sub);
+        }
+    }
+    if mentions_local_actor(state, activity) {
+        for owner in state.store.known_owner_subs().await {
+            if notified.insert(owner.clone()) {
+                add_notification(state, &owner, "mention", sender, &home.id).await;
+            }
+        }
+    }
+}
+
+async fn notify_known_owners(state: &AppState, kind: &str, actor: &str, note_uri: &str) {
+    for owner in state.store.known_owner_subs().await {
+        add_notification(state, &owner, kind, actor, note_uri).await;
+    }
+}
+
+async fn add_notification(
+    state: &AppState,
+    owner_sub: &str,
+    kind: &str,
+    actor: &str,
+    note_uri: &str,
+) {
+    if owner_sub.is_empty() {
+        return;
+    }
+    let notification = Notification {
+        id: format!("notif_{}", now_nanos()),
+        owner_sub: owner_sub.to_string(),
+        kind: kind.to_string(),
+        actor: actor.to_string(),
+        note_uri: note_uri.to_string(),
+        created_at: now_secs(),
+        read: false,
+    };
+    if let Err(e) = state.store.add_notification(&notification).await {
+        tracing::warn!(owner = %owner_sub, kind, error = %e, "failed to record notification");
+        return;
+    }
+    state.audit.emit(AuditEvent::info(
+        "crier.notification.add",
+        actor,
+        owner_sub,
+        kind,
+    ));
+}
+
+fn mentions_local_actor(state: &AppState, activity: &Value) -> bool {
+    let Some(obj) = activity.get("object") else {
+        return false;
+    };
+    let actor_url = state.config.actor_url();
+    let handle = format!("@{}", state.config.handle());
+    if let Some(tags) = obj.get("tag").and_then(Value::as_array) {
+        for tag in tags {
+            let is_mention = tag.get("type").and_then(Value::as_str) == Some("Mention");
+            if !is_mention {
+                continue;
+            }
+            let href_match = tag
+                .get("href")
+                .or_else(|| tag.get("id"))
+                .and_then(Value::as_str)
+                .is_some_and(|s| s == actor_url);
+            let name_match = tag
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.eq_ignore_ascii_case(&handle));
+            if href_match || name_match {
+                return true;
+            }
+        }
+    }
+    obj.get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.contains(&actor_url) || s.contains(&handle))
+}
+
+fn local_note_id(state: &AppState, uri: &str) -> Option<String> {
+    let prefix = format!(
+        "{}/users/{}/notes/",
+        state.config.base_url(),
+        state.config.actor
+    );
+    uri.strip_prefix(&prefix)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.contains('/'))
+        .map(str::to_string)
+}
+
+fn object_id(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Value::Object(o)) => o.get("id").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    }
 }
 
 /// Parse an RFC3339 timestamp into epoch seconds (best-effort; `None` on any error).
 fn parse_rfc3339_secs(s: &str) -> Option<i64> {
     use time::format_description::well_known::Rfc3339;
-    time::OffsetDateTime::parse(s, &Rfc3339).ok().map(|dt| dt.unix_timestamp())
+    time::OffsetDateTime::parse(s, &Rfc3339)
+        .ok()
+        .map(|dt| dt.unix_timestamp())
 }
 
 /// `202 Accepted` with an empty body — the standard ActivityPub inbox acknowledgement.

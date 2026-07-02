@@ -377,3 +377,9 @@ hr { border:none; border-top:1px solid var(--border); margin:20px 0; }
 .tag[href]:hover { filter: brightness(.97); }
 .note__body .tag { margin: 0 1px; }
 .note--boost { border-left: 3px solid var(--accent); }
+.notification--unread { border-left: 3px solid var(--info); padding-left: 14px; }
+
+@media (max-width: 760px) {
+  .appbar { height: auto; min-height: 56px; flex-wrap: wrap; padding: 8px 12px; }
+  .appbar__nav { order: 3; width: 100%; overflow-x: auto; margin-left: 0; padding-bottom: 2px; }
+}

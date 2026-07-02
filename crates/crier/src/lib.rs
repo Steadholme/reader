@@ -72,6 +72,8 @@ pub fn app(state: AppState) -> Router {
         // --- SSO web surface ---
         .route("/", get(handlers::web::index))
         .route("/home", get(handlers::web::home))
+        .route("/notifications", get(handlers::web::notifications))
+        .route("/thread/{id}", get(handlers::web::thread))
         .route("/api/notes", post(handlers::web::create_note))
         .route("/api/notes/{id}/edit", post(handlers::web::edit_note))
         .route("/api/notes/{id}/delete", post(handlers::web::delete_note))
@@ -79,6 +81,11 @@ pub fn app(state: AppState) -> Router {
         .route("/api/profile", post(handlers::web::set_profile))
         .route("/api/boost", post(handlers::web::boost))
         .route("/api/unboost", post(handlers::web::unboost))
+        .route("/blocks", get(handlers::web::blocks_page))
+        .route("/blocks/block", post(handlers::web::block_actor))
+        .route("/blocks/unblock", post(handlers::web::unblock_actor))
+        .route("/blocks/mute", post(handlers::web::mute_actor))
+        .route("/blocks/unmute", post(handlers::web::unmute_actor))
         // Hashtag pages (SSO web surface).
         .route("/tags/{tag}", get(handlers::web::tag_page))
         // User-defined lists + their filtered timelines (SSO web surface).

@@ -90,6 +90,8 @@ const ALLAPPS_SVG: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="curre
 const ICON_USER: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"##;
 const ICON_HOME: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>"##;
 const ICON_LIST: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>"##;
+const ICON_BELL: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.8 14.29 18 12.6 18 8a6 6 0 0 0-12 0c0 4.6-1.8 6.29-2.74 7.33"/></svg>"##;
+const ICON_BAN: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 14.14 14.14"/></svg>"##;
 const ICON_CARET: &str = r##"<svg class="usermenu__caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>"##;
 const ICON_LOGOUT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>"##;
 
@@ -99,15 +101,37 @@ const ICON_LOGOUT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="curre
 /// logout route/method are preserved exactly (a GET link to the gateway) as a danger menu item;
 /// with no gateway identity (public/error chrome) the avatar falls back to a neutral glyph.
 pub fn topbar(page_title: &str, email: &str) -> String {
-    // "Profile" is the default active section; Home / Lists highlight when selected.
-    let profile_cls = if page_title == "Home" || page_title == "Lists" {
+    // "Profile" is the default active section; app sections highlight when selected.
+    let profile_cls = if matches!(page_title, "Home" | "Lists" | "Notifications" | "Blocks") {
         ""
     } else {
         " is-active"
     };
-    let home_cls = if page_title == "Home" { " is-active" } else { "" };
-    let lists_cls = if page_title == "Lists" { " is-active" } else { "" };
-    let ident = if email.is_empty() || email == "—" { "" } else { email };
+    let home_cls = if page_title == "Home" {
+        " is-active"
+    } else {
+        ""
+    };
+    let lists_cls = if page_title == "Lists" {
+        " is-active"
+    } else {
+        ""
+    };
+    let notifications_cls = if page_title == "Notifications" {
+        " is-active"
+    } else {
+        ""
+    };
+    let blocks_cls = if page_title == "Blocks" {
+        " is-active"
+    } else {
+        ""
+    };
+    let ident = if email.is_empty() || email == "—" {
+        ""
+    } else {
+        email
+    };
     let (initials, name, sub) = identity_bits(ident);
     format!(
         r#"<header class="appbar">
@@ -119,6 +143,8 @@ pub fn topbar(page_title: &str, email: &str) -> String {
     <a class="appnav{profile_cls}" href="/">{icon_user}Profile</a>
     <a class="appnav{home_cls}" href="/home">{icon_home}Home</a>
     <a class="appnav{lists_cls}" href="/lists">{icon_list}Lists</a>
+    <a class="appnav{notifications_cls}" href="/notifications">{icon_bell}Notifications</a>
+    <a class="appnav{blocks_cls}" href="/blocks">{icon_ban}Blocks</a>
   </nav>
   <span class="appbar__spacer"></span>
   <div class="appbar__right">
@@ -140,9 +166,13 @@ pub fn topbar(page_title: &str, email: &str) -> String {
         profile_cls = profile_cls,
         home_cls = home_cls,
         lists_cls = lists_cls,
+        notifications_cls = notifications_cls,
+        blocks_cls = blocks_cls,
         icon_user = ICON_USER,
         icon_home = ICON_HOME,
         icon_list = ICON_LIST,
+        icon_bell = ICON_BELL,
+        icon_ban = ICON_BAN,
         icon_caret = ICON_CARET,
         icon_logout = ICON_LOGOUT,
         allapps = ALLAPPS_SVG,
@@ -159,7 +189,11 @@ pub fn topbar(page_title: &str, email: &str) -> String {
 fn identity_bits(email: &str) -> (String, String, String) {
     let e = email.trim();
     if e.is_empty() {
-        return ("H".to_string(), "Account".to_string(), "Signed in".to_string());
+        return (
+            "H".to_string(),
+            "Account".to_string(),
+            "Signed in".to_string(),
+        );
     }
     let local = e.split('@').next().unwrap_or(e);
     let initials = local

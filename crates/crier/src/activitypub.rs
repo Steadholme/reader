@@ -357,6 +357,7 @@ mod tests {
             content: "with a picture".to_string(),
             visibility: "public".to_string(),
             created_at: 1_700_000_000,
+            in_reply_to: String::new(),
             updated_at: 0,
             attachment_url: "https://aperture.w33d.xyz/s/pic.webp".to_string(),
         };
@@ -376,6 +377,7 @@ mod tests {
             content: "no picture".to_string(),
             visibility: "public".to_string(),
             created_at: 1_700_000_000,
+            in_reply_to: String::new(),
             updated_at: 0,
             attachment_url: String::new(),
         };
@@ -392,6 +394,7 @@ mod tests {
             content: "hello world".to_string(),
             visibility: "public".to_string(),
             created_at: 1_700_000_000,
+            in_reply_to: String::new(),
             updated_at: 0,
             attachment_url: String::new(),
         };

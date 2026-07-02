@@ -15,11 +15,9 @@ use crate::audit::AuditEvent;
 use crate::auth;
 use crate::config::MAX_CONTENT_CHARS;
 use crate::error::AppError;
+use crate::handlers::{esc, fmt_date, render_note_html, render_note_html_tagged, topbar, APP_CSS};
 use crate::hashtag::parse_hashtags;
-use crate::handlers::{
-    esc, fmt_date, render_note_html, render_note_html_tagged, topbar, APP_CSS,
-};
-use crate::store::{Boost, Following, HomeNote, List, Note};
+use crate::store::{ActorFilter, Boost, Following, HomeNote, List, Note, Notification};
 use crate::{federation, now_nanos, now_secs, AppState};
 
 /// Hard cap on a list name, in characters.
@@ -37,6 +35,9 @@ pub struct NoteForm {
     /// Optional image URL (an Aperture share URL) to attach to the note. Empty => no attachment.
     #[serde(default)]
     pub attachment_url: String,
+    /// Optional ActivityPub object id this note replies to. Existing forms leave it empty.
+    #[serde(default)]
+    pub in_reply_to: String,
     #[serde(default)]
     pub csrf_token: String,
 }
@@ -58,7 +59,11 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
     let mut timeline: Vec<(i64, String, String)> = Vec::new();
     for n in &notes {
         let owned = !viewer.is_empty() && n.author_sub == viewer;
-        timeline.push((n.created_at, n.id.clone(), render_note(n, &csrf, owned)));
+        timeline.push((
+            n.created_at,
+            n.id.clone(),
+            render_note(n, &csrf, owned, &state.config),
+        ));
     }
     for b in &boosts {
         timeline.push((b.created_at, b.id.clone(), render_boost_card(b, &csrf)));
@@ -69,7 +74,10 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
     let items = if timeline.is_empty() {
         r#"<div class="empty-state"><h2>No posts yet</h2><p>Say something — your first note will appear here and federate to your followers.</p></div>"#.to_string()
     } else {
-        timeline.into_iter().map(|(_, _, html)| html).collect::<String>()
+        timeline
+            .into_iter()
+            .map(|(_, _, html)| html)
+            .collect::<String>()
     };
     let tags_html = render_tags_section(&top_tags);
 
@@ -173,6 +181,7 @@ pub async fn create_note(
     // An attached image must be a plain http(s) URL — this blocks `javascript:`/`data:` payloads
     // from ever reaching the timeline `<img src>` or the federated attachment.
     let attachment_url = validate_optional_url(&form.attachment_url)?;
+    let in_reply_to = validate_optional_object_id(&form.in_reply_to)?;
 
     let now = now_secs();
     let note = Note {
@@ -181,6 +190,7 @@ pub async fn create_note(
         content: content.to_string(),
         visibility: "public".to_string(),
         created_at: now,
+        in_reply_to,
         updated_at: 0,
         attachment_url,
     };
@@ -306,9 +316,12 @@ pub async fn delete_note(
     }
 
     // Destructive action -> warning severity. WHO deleted WHICH note — never the body.
-    state
-        .audit
-        .emit(AuditEvent::warning("crier.note.delete", &sub, &id, "deleted"));
+    state.audit.emit(AuditEvent::warning(
+        "crier.note.delete",
+        &sub,
+        &id,
+        "deleted",
+    ));
 
     // Best-effort federation: announce a Delete/Tombstone to followers (spawned; never blocks).
     if state.config.federate {
@@ -345,7 +358,9 @@ pub async fn follow_remote(
 
     let target = form.target.trim().to_string();
     if target.is_empty() {
-        return Err(AppError::InvalidRequest("a remote actor is required".to_string()));
+        return Err(AppError::InvalidRequest(
+            "a remote actor is required".to_string(),
+        ));
     }
 
     // A direct actor URL is recorded up front so `is_following` gates the home timeline even before
@@ -373,7 +388,9 @@ pub async fn follow_remote(
         let cfg = state.config.clone();
         let store = state.store.clone();
         let signer = state.signer.clone();
-        tokio::spawn(federation::follow_target(client, cfg, store, signer, target));
+        tokio::spawn(federation::follow_target(
+            client, cfg, store, signer, target,
+        ));
     }
 
     Ok(redirect("/home"))
@@ -422,6 +439,403 @@ pub async fn set_profile(
     ));
 
     Ok(redirect("/"))
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+/// `GET /notifications` — owner-scoped notification inbox, newest-first. The unread count shown on
+/// the page is captured before marking the rows read.
+pub async fn notifications(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let email = auth::display_email(&headers);
+    let owner = auth::require_author(&headers)?.0;
+    let (csrf, set_cookie) = auth::ensure_csrf(&headers);
+
+    let unread = state.store.count_unread_notifications(&owner).await;
+    let notifications = state.store.list_notifications(&owner).await;
+    state.store.mark_notifications_read(&owner).await?;
+
+    let rows = if notifications.is_empty() {
+        r#"<div class="empty-state"><h2>No notifications</h2><p>Mentions, replies, boosts, and new followers will appear here.</p></div>"#.to_string()
+    } else {
+        notifications
+            .iter()
+            .map(|n| render_notification(n, &state.config))
+            .collect::<String>()
+    };
+
+    let page = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Notifications · Crier · HOLDFAST</title><style>{css}</style></head>
+<body class="page-reading">
+{topbar}
+<main class="reader">
+  <div class="profile">
+    <h1 class="profile__name">Notifications</h1>
+    <p class="profile__summary">Mentions, replies, boosts, and new followers.</p>
+    <div class="profile__stats">
+      <span class="pill pill-accent">{unread} unread</span>
+      <span><a class="btn btn-ghost btn-sm" href="/">&larr; Your profile</a></span>
+    </div>
+  </div>
+  <div class="note-list">
+    {rows}
+  </div>
+</main>
+</body></html>"#,
+        css = APP_CSS,
+        topbar = topbar("Notifications", &email),
+        unread = unread,
+        rows = rows,
+    );
+
+    let _ = csrf; // keep CSRF cookie issuance consistent with other SSO pages.
+    Ok(html_with_cookie(page, set_cookie))
+}
+
+fn render_notification(n: &Notification, cfg: &crate::config::Config) -> String {
+    let (title, detail) = match n.kind.as_str() {
+        "reply" => ("Reply", "replied to your post"),
+        "mention" => ("Mention", "mentioned you"),
+        "boost" => ("Boost", "boosted your post"),
+        "follow" => ("Follow", "followed you"),
+        _ => ("Notification", "notified you"),
+    };
+    let unread = if n.read {
+        ""
+    } else {
+        r#"<span class="pill pill-info">Unread</span>"#
+    };
+    let link = notification_link(cfg, &n.note_uri);
+    format!(
+        r#"<article class="note notification{unread_cls}">
+  <div class="note__meta">{title} {unread}</div>
+  <div class="note__body"><a href="{actor}" rel="noopener noreferrer nofollow">{actor_label}</a> {detail}{link}</div>
+  <div class="note__meta">{date}</div>
+</article>"#,
+        unread_cls = if n.read { "" } else { " notification--unread" },
+        title = esc(title),
+        unread = unread,
+        actor = esc(&n.actor),
+        actor_label = esc(&n.actor),
+        detail = esc(detail),
+        link = link,
+        date = esc(&fmt_date(n.created_at)),
+    )
+}
+
+fn notification_link(cfg: &crate::config::Config, note_uri: &str) -> String {
+    if note_uri.is_empty() {
+        return String::new();
+    }
+    let href = thread_href_for_uri(cfg, note_uri).unwrap_or_else(|| note_uri.to_string());
+    format!(
+        r#" · <a href="{href}" rel="noopener noreferrer nofollow">View</a>"#,
+        href = esc(&href),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Conversation threads
+// ---------------------------------------------------------------------------
+
+/// `GET /thread/{id}` — a local note with local ancestors and direct local/remote replies.
+pub async fn thread(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let email = auth::display_email(&headers);
+    let viewer = auth::author_sub(&headers).unwrap_or_default();
+    let (csrf, set_cookie) = auth::ensure_csrf(&headers);
+
+    let Some(note) = state.store.get_note(&id).await else {
+        return Err(AppError::NotFound("no such note".to_string()));
+    };
+
+    let mut ancestors = Vec::new();
+    let mut cursor = note.in_reply_to.clone();
+    for _ in 0..32 {
+        let Some(parent_id) = local_note_id_from_uri(&state.config, &cursor) else {
+            break;
+        };
+        let Some(parent) = state.store.get_note(&parent_id).await else {
+            break;
+        };
+        cursor = parent.in_reply_to.clone();
+        ancestors.push(parent);
+    }
+    ancestors.reverse();
+
+    let note_uri = state.config.note_url(&id);
+    let local_replies = state.store.list_local_replies(&note_uri).await;
+    let remote_replies = state.store.list_home_replies(&note_uri).await;
+
+    let mut items = String::new();
+    for n in &ancestors {
+        let owned = !viewer.is_empty() && n.author_sub == viewer;
+        items.push_str(&render_note(n, &csrf, owned, &state.config));
+    }
+    let owned = !viewer.is_empty() && note.author_sub == viewer;
+    items.push_str(&render_note(&note, &csrf, owned, &state.config));
+
+    let mut replies: Vec<(i64, String, String)> = Vec::new();
+    for n in &local_replies {
+        let owned = !viewer.is_empty() && n.author_sub == viewer;
+        replies.push((
+            n.created_at,
+            n.id.clone(),
+            render_note(n, &csrf, owned, &state.config),
+        ));
+    }
+    for n in &remote_replies {
+        let when = if n.published > 0 {
+            n.published
+        } else {
+            n.received_at
+        };
+        replies.push((when, n.id.clone(), render_home_note_plain(n, &state.config)));
+    }
+    replies.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, _, html) in replies {
+        items.push_str(&html);
+    }
+
+    let page = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Thread · Crier · HOLDFAST</title><style>{css}</style></head>
+<body class="page-reading">
+{topbar}
+<main class="reader">
+  <div class="profile">
+    <h1 class="profile__name">Thread</h1>
+    <p class="profile__summary">This post with its local ancestors and direct replies.</p>
+    <div class="profile__stats"><span><a class="btn btn-ghost btn-sm" href="/">&larr; Your profile</a></span></div>
+  </div>
+  <div class="note-list">
+    {items}
+  </div>
+</main>
+</body></html>"#,
+        css = APP_CSS,
+        topbar = topbar("Thread", &email),
+        items = items,
+    );
+
+    Ok(html_with_cookie(page, set_cookie))
+}
+
+// ---------------------------------------------------------------------------
+// Blocks / mutes
+// ---------------------------------------------------------------------------
+
+/// Actor filter form: CSRF + a remote actor id URL.
+#[derive(Debug, Deserialize)]
+pub struct ActorFilterForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    #[serde(default)]
+    pub actor: String,
+}
+
+/// `GET /blocks` — owner-scoped block/mute management for remote actors.
+pub async fn blocks_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let email = auth::display_email(&headers);
+    let owner = auth::require_author(&headers)?.0;
+    let (csrf, set_cookie) = auth::ensure_csrf(&headers);
+
+    let blocks = state.store.list_actor_blocks(&owner).await;
+    let mutes = state.store.list_mutes(&owner).await;
+    let block_rows = if blocks.is_empty() {
+        r#"<li class="list__meta">No blocked actors.</li>"#.to_string()
+    } else {
+        blocks
+            .iter()
+            .map(|b| {
+                render_actor_filter_row(b, &csrf, "/blocks/unblock", "Unblock", "btn-secondary")
+            })
+            .collect::<String>()
+    };
+    let mute_rows = if mutes.is_empty() {
+        r#"<li class="list__meta">No muted actors.</li>"#.to_string()
+    } else {
+        mutes
+            .iter()
+            .map(|m| render_actor_filter_row(m, &csrf, "/blocks/unmute", "Unmute", "btn-secondary"))
+            .collect::<String>()
+    };
+
+    let page = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Blocks · Crier · HOLDFAST</title><style>{css}</style></head>
+<body class="page-reading">
+{topbar}
+<main class="reader">
+  <div class="profile">
+    <h1 class="profile__name">Blocks &amp; mutes</h1>
+    <p class="profile__summary">Muted actors are hidden from Home. Blocked actors are hidden and rejected at the inbox.</p>
+    <div class="profile__stats"><span><a class="btn btn-ghost btn-sm" href="/home">&larr; Home timeline</a></span></div>
+  </div>
+  <section class="card composer"><div class="card__body">
+    <h2>Block an actor</h2>
+    <form method="post" action="/blocks/block">
+      <input type="hidden" name="csrf_token" value="{csrf}">
+      <div class="field">
+        <label for="block-actor">Remote actor URL</label>
+        <input id="block-actor" name="actor" class="composer__body" placeholder="https://mastodon.social/users/foo" required>
+      </div>
+      <div class="composer__actions"><button class="btn btn-danger" type="submit">Block</button></div>
+    </form>
+    <ul class="list">{block_rows}</ul>
+  </div></section>
+  <section class="card"><div class="card__body">
+    <h2>Mute an actor</h2>
+    <form method="post" action="/blocks/mute">
+      <input type="hidden" name="csrf_token" value="{csrf}">
+      <div class="field">
+        <label for="mute-actor">Remote actor URL</label>
+        <input id="mute-actor" name="actor" class="composer__body" placeholder="https://mastodon.social/users/foo" required>
+      </div>
+      <div class="composer__actions"><button class="btn btn-primary" type="submit">Mute</button></div>
+    </form>
+    <ul class="list">{mute_rows}</ul>
+  </div></section>
+</main>
+</body></html>"#,
+        css = APP_CSS,
+        topbar = topbar("Blocks", &email),
+        csrf = esc(&csrf),
+        block_rows = block_rows,
+        mute_rows = mute_rows,
+    );
+
+    Ok(html_with_cookie(page, set_cookie))
+}
+
+pub async fn block_actor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ActorFilterForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+    let actor = validate_actor_url(&form.actor)?;
+    state
+        .store
+        .add_actor_block(&ActorFilter {
+            owner_sub: sub.clone(),
+            actor: actor.clone(),
+            created_at: now_secs(),
+        })
+        .await?;
+    tracing::info!(%actor, "actor blocked");
+    state
+        .audit
+        .emit(AuditEvent::notice("crier.block.add", &sub, &actor, "block"));
+    Ok(redirect("/blocks"))
+}
+
+pub async fn unblock_actor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ActorFilterForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+    let actor = validate_actor_url(&form.actor)?;
+    state.store.remove_actor_block(&sub, &actor).await?;
+    tracing::info!(%actor, "actor unblocked");
+    state.audit.emit(AuditEvent::notice(
+        "crier.block.remove",
+        &sub,
+        &actor,
+        "unblock",
+    ));
+    Ok(redirect("/blocks"))
+}
+
+pub async fn mute_actor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ActorFilterForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+    let actor = validate_actor_url(&form.actor)?;
+    state
+        .store
+        .add_mute(&ActorFilter {
+            owner_sub: sub.clone(),
+            actor: actor.clone(),
+            created_at: now_secs(),
+        })
+        .await?;
+    tracing::info!(%actor, "actor muted");
+    state
+        .audit
+        .emit(AuditEvent::notice("crier.mute.add", &sub, &actor, "mute"));
+    Ok(redirect("/blocks"))
+}
+
+pub async fn unmute_actor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ActorFilterForm>,
+) -> Result<Response, AppError> {
+    let (sub, _email) = auth::require_author(&headers)?;
+    auth::verify_csrf(&headers, &form.csrf_token)?;
+    let actor = validate_actor_url(&form.actor)?;
+    state.store.remove_mute(&sub, &actor).await?;
+    tracing::info!(%actor, "actor unmuted");
+    state.audit.emit(AuditEvent::notice(
+        "crier.mute.remove",
+        &sub,
+        &actor,
+        "unmute",
+    ));
+    Ok(redirect("/blocks"))
+}
+
+fn render_actor_filter_row(
+    filter: &ActorFilter,
+    csrf: &str,
+    action: &str,
+    label: &str,
+    class_name: &str,
+) -> String {
+    format!(
+        r#"<li>
+  <span class="title">{actor}</span>
+  <span class="list__meta">{date}</span>
+  <form class="inline-form" method="post" action="{action}" style="margin-left:auto">
+    <input type="hidden" name="csrf_token" value="{csrf}">
+    <input type="hidden" name="actor" value="{actor}">
+    <button class="btn {class_name} btn-sm" type="submit">{label}</button>
+  </form>
+</li>"#,
+        actor = esc(&filter.actor),
+        date = esc(&fmt_date(filter.created_at)),
+        action = esc(action),
+        csrf = esc(csrf),
+        class_name = esc(class_name),
+        label = esc(label),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -478,12 +892,9 @@ pub async fn boost(
     };
     state.store.add_boost(&boost).await?;
     tracing::info!(uri = %hn.id, "note boosted");
-    state.audit.emit(AuditEvent::notice(
-        "crier.boost.add",
-        &sub,
-        &hn.id,
-        "boost",
-    ));
+    state
+        .audit
+        .emit(AuditEvent::notice("crier.boost.add", &sub, &hn.id, "boost"));
 
     // Best-effort federation: Announce the boost to our followers (spawned; never blocks).
     if state.config.federate {
@@ -560,7 +971,7 @@ pub async fn tag_page(
             .iter()
             .map(|n| {
                 let owned = !viewer.is_empty() && n.author_sub == viewer;
-                render_note(n, &csrf, owned)
+                render_note(n, &csrf, owned, &state.config)
             })
             .collect::<String>()
     };
@@ -630,7 +1041,8 @@ pub async fn lists_index(State(state): State<AppState>, headers: HeaderMap) -> R
 
     let lists = state.store.list_lists(&owner).await;
     let rows = if lists.is_empty() {
-        r#"<li class="list__meta">No lists yet. Create one to build a focused timeline.</li>"#.to_string()
+        r#"<li class="list__meta">No lists yet. Create one to build a focused timeline.</li>"#
+            .to_string()
     } else {
         lists
             .iter()
@@ -712,7 +1124,9 @@ pub async fn create_list(
     };
     state.store.create_list(&list).await?;
     tracing::info!(id = %list.id, "list created");
-    state.audit.emit(AuditEvent::info("crier.list.create", &sub, &list.id, name));
+    state
+        .audit
+        .emit(AuditEvent::info("crier.list.create", &sub, &list.id, name));
     Ok(redirect("/lists"))
 }
 
@@ -731,7 +1145,12 @@ pub async fn delete_list(
         return Err(AppError::NotFound("no such list".to_string()));
     }
     tracing::info!(id = %id, "list deleted");
-    state.audit.emit(AuditEvent::notice("crier.list.delete", &sub, &id, "deleted"));
+    state.audit.emit(AuditEvent::notice(
+        "crier.list.delete",
+        &sub,
+        &id,
+        "deleted",
+    ));
     Ok(redirect("/lists"))
 }
 
@@ -755,7 +1174,10 @@ pub async fn list_detail(
     let items = if notes.is_empty() {
         r#"<div class="empty-state"><h2>Nothing here yet</h2><p>Add members below; their posts will stream into this list.</p></div>"#.to_string()
     } else {
-        notes.iter().map(render_home_note_plain).collect::<String>()
+        notes
+            .iter()
+            .map(|n| render_home_note_plain(n, &state.config))
+            .collect::<String>()
     };
 
     let member_rows = if members.is_empty() {
@@ -869,18 +1291,24 @@ pub async fn remove_list_member(
 }
 
 /// A home-note card without boost controls (used inside the list timeline).
-fn render_home_note_plain(note: &HomeNote) -> String {
-    let when = if note.published > 0 { note.published } else { note.received_at };
+fn render_home_note_plain(note: &HomeNote, cfg: &crate::config::Config) -> String {
+    let when = if note.published > 0 {
+        note.published
+    } else {
+        note.received_at
+    };
+    let reply = render_reply_link(cfg, &note.in_reply_to);
     format!(
         r#"<article class="note">
   <div class="note__meta"><a href="{url}" rel="noopener noreferrer nofollow">{actor}</a></div>
   <div class="note__body">{body}</div>
-  <div class="note__meta">{date}</div>
+  <div class="note__meta">{date}{reply}</div>
 </article>"#,
         url = esc(&note.url),
         actor = esc(&note.actor),
         body = render_note_html(&note.content),
         date = esc(&fmt_date(when)),
+        reply = reply,
     )
 }
 
@@ -888,9 +1316,14 @@ fn render_home_note_plain(note: &HomeNote) -> String {
 /// Each note carries a boost / un-boost control (boosting re-shares it to our followers).
 pub async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let email = auth::display_email(&headers);
+    let owner = auth::author_sub(&headers).unwrap_or_default();
     let (csrf, set_cookie) = auth::ensure_csrf(&headers);
 
-    let notes = state.store.list_home_notes().await;
+    let notes = if owner.is_empty() {
+        state.store.list_home_notes().await
+    } else {
+        state.store.list_home_notes_for_owner(&owner).await
+    };
     let following = state.store.list_following().await;
 
     let mut items = String::new();
@@ -901,7 +1334,7 @@ pub async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response
     } else {
         for n in &notes {
             let boosted = state.store.is_boosted(&n.id).await;
-            items.push_str(&render_home_note(n, &csrf, boosted));
+            items.push_str(&render_home_note(n, &csrf, boosted, &state.config));
         }
     }
 
@@ -935,15 +1368,33 @@ pub async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response
 
 /// One home-timeline card: the source actor + the (escaped) remote content + a UTC date, plus a
 /// boost / un-boost control. `boosted` selects which action the button offers.
-fn render_home_note(note: &HomeNote, csrf: &str, boosted: bool) -> String {
-    let when = if note.published > 0 { note.published } else { note.received_at };
-    let action = if boosted { "/api/unboost" } else { "/api/boost" };
-    let label = if boosted { "🔁 Un-boost" } else { "🔁 Boost" };
+fn render_home_note(
+    note: &HomeNote,
+    csrf: &str,
+    boosted: bool,
+    cfg: &crate::config::Config,
+) -> String {
+    let when = if note.published > 0 {
+        note.published
+    } else {
+        note.received_at
+    };
+    let action = if boosted {
+        "/api/unboost"
+    } else {
+        "/api/boost"
+    };
+    let label = if boosted {
+        "🔁 Un-boost"
+    } else {
+        "🔁 Boost"
+    };
+    let reply = render_reply_link(cfg, &note.in_reply_to);
     format!(
         r#"<article class="note">
   <div class="note__meta"><a href="{url}" rel="noopener noreferrer nofollow">{actor}</a></div>
   <div class="note__body">{body}</div>
-  <div class="note__meta">{date}</div>
+  <div class="note__meta">{date}{reply}</div>
   <div class="note__actions">
     <form method="post" action="{action}">
       <input type="hidden" name="csrf_token" value="{csrf}">
@@ -956,6 +1407,7 @@ fn render_home_note(note: &HomeNote, csrf: &str, boosted: bool) -> String {
         actor = esc(&note.actor),
         body = render_note_html(&note.content),
         date = esc(&fmt_date(when)),
+        reply = reply,
         action = action,
         label = label,
         csrf = esc(csrf),
@@ -967,7 +1419,9 @@ fn render_home_note(note: &HomeNote, csrf: &str, boosted: bool) -> String {
 fn validate_content(raw: &str) -> Result<&str, AppError> {
     let content = raw.trim();
     if content.is_empty() {
-        return Err(AppError::InvalidRequest("note content is required".to_string()));
+        return Err(AppError::InvalidRequest(
+            "note content is required".to_string(),
+        ));
     }
     if content.chars().count() > MAX_CONTENT_CHARS {
         return Err(AppError::InvalidRequest(format!(
@@ -995,34 +1449,102 @@ fn validate_optional_url(raw: &str) -> Result<String, AppError> {
         ));
     }
     if url.chars().count() > MAX_URL_CHARS {
-        return Err(AppError::InvalidRequest("image URL is too long".to_string()));
+        return Err(AppError::InvalidRequest(
+            "image URL is too long".to_string(),
+        ));
     }
     Ok(url.to_string())
+}
+
+fn validate_optional_object_id(raw: &str) -> Result<String, AppError> {
+    let uri = raw.trim();
+    if uri.is_empty() {
+        return Ok(String::new());
+    }
+    if !(uri.starts_with("https://") || uri.starts_with("http://")) {
+        return Err(AppError::InvalidRequest(
+            "reply target must start with http:// or https://".to_string(),
+        ));
+    }
+    if uri.chars().count() > MAX_URL_CHARS {
+        return Err(AppError::InvalidRequest(
+            "reply target is too long".to_string(),
+        ));
+    }
+    Ok(uri.to_string())
+}
+
+fn validate_actor_url(raw: &str) -> Result<String, AppError> {
+    let actor = raw.trim();
+    if actor.is_empty() {
+        return Err(AppError::InvalidRequest("an actor is required".to_string()));
+    }
+    if !(actor.starts_with("https://") || actor.starts_with("http://")) {
+        return Err(AppError::InvalidRequest(
+            "actor must start with http:// or https://".to_string(),
+        ));
+    }
+    if actor.chars().count() > MAX_URL_CHARS {
+        return Err(AppError::InvalidRequest(
+            "actor URL is too long".to_string(),
+        ));
+    }
+    Ok(actor.to_string())
 }
 
 // ---------------------------------------------------------------------------
 // Render helpers
 // ---------------------------------------------------------------------------
 
+fn render_reply_link(cfg: &crate::config::Config, in_reply_to: &str) -> String {
+    if in_reply_to.is_empty() {
+        return String::new();
+    }
+    let href = thread_href_for_uri(cfg, in_reply_to).unwrap_or_else(|| in_reply_to.to_string());
+    format!(
+        r#" · <a href="{href}" rel="noopener noreferrer nofollow">In reply to</a>"#,
+        href = esc(&href),
+    )
+}
+
+fn thread_href_for_uri(cfg: &crate::config::Config, uri: &str) -> Option<String> {
+    local_note_id_from_uri(cfg, uri).map(|id| format!("/thread/{id}"))
+}
+
+fn local_note_id_from_uri(cfg: &crate::config::Config, uri: &str) -> Option<String> {
+    let prefix = format!("{}/users/{}/notes/", cfg.base_url(), cfg.actor);
+    uri.strip_prefix(&prefix)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.contains('/'))
+        .map(str::to_string)
+}
+
 /// One timeline note card: rendered (escaped) content + a UTC date, plus owner-only edit/delete
 /// controls when `owned`. Every interpolated field is escaped.
-fn render_note(note: &Note, csrf: &str, owned: bool) -> String {
-    let edited = if note.updated_at > 0 { " · edited" } else { "" };
+fn render_note(note: &Note, csrf: &str, owned: bool, cfg: &crate::config::Config) -> String {
+    let edited = if note.updated_at > 0 {
+        " · edited"
+    } else {
+        ""
+    };
     let controls = if owned {
         render_controls(note, csrf)
     } else {
         String::new()
     };
     let media = render_media(&note.attachment_url);
+    let reply = render_reply_link(cfg, &note.in_reply_to);
     format!(
         r#"<article class="note">
   <div class="note__body">{body}</div>{media}
-  <div class="note__meta">{date}{edited}</div>{controls}
+  <div class="note__meta">{date}{edited} · <a href="/thread/{id}">Thread</a>{reply}</div>{controls}
 </article>"#,
+        id = esc(&note.id),
         body = render_note_html_tagged(&note.content),
         media = media,
         date = esc(&fmt_date(note.created_at)),
         edited = edited,
+        reply = reply,
         controls = controls,
     )
 }
@@ -1076,7 +1598,10 @@ fn render_controls(note: &Note, csrf: &str) -> String {
 fn redirect(location: &str) -> Response {
     (
         StatusCode::SEE_OTHER,
-        [(header::LOCATION, HeaderValue::from_str(location).expect("valid location"))],
+        [(
+            header::LOCATION,
+            HeaderValue::from_str(location).expect("valid location"),
+        )],
     )
         .into_response()
 }

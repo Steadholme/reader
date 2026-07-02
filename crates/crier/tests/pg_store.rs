@@ -43,6 +43,7 @@ async fn pg_store_full_integration() {
         content: "from postgres".to_string(),
         visibility: "public".to_string(),
         created_at: now - 100,
+        in_reply_to: String::new(),
         updated_at: 0,
         attachment_url: "https://aperture.w33d.xyz/s/pg.png".to_string(),
     };
@@ -60,6 +61,7 @@ async fn pg_store_full_integration() {
         content: "later".to_string(),
         visibility: "public".to_string(),
         created_at: now,
+        in_reply_to: String::new(),
         updated_at: 0,
         attachment_url: String::new(),
     };
@@ -173,6 +175,7 @@ async fn pg_store_full_integration() {
         content: "hi".to_string(),
         url: "https://remote.example/notes/z1".to_string(),
         published: 0,
+        in_reply_to: String::new(),
         received_at: now,
     })
     .await
