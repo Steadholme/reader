@@ -13,7 +13,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::activitypub::{
-    accept_activity, create_activity, delete_activity, update_activity, ACTIVITY_JSON,
+    accept_activity, announce_activity, create_activity, delete_activity, undo_announce_activity,
+    update_activity, ACTIVITY_JSON,
 };
 use crate::config::Config;
 use crate::httpsig::{self, Signer};
@@ -283,4 +284,33 @@ pub async fn deliver_delete(
     let stamp = crate::now_nanos().to_string();
     let activity = delete_activity(&cfg, &note_id, &stamp);
     fan_out(&client, &store, &signer, &activity, "Delete").await;
+}
+
+/// Fan a boost out to every follower as an `Announce` of the remote `note_uri`. Spawned by the boost
+/// handler; the local boost row is already stored, so the timeline is correct even if delivery fails.
+pub async fn deliver_announce(
+    client: reqwest::Client,
+    cfg: Arc<Config>,
+    store: Arc<dyn Store>,
+    signer: Arc<Signer>,
+    note_uri: String,
+    note_actor: String,
+) {
+    let stamp = crate::now_nanos().to_string();
+    let activity = announce_activity(&cfg, &note_uri, &note_actor, &stamp);
+    fan_out(&client, &store, &signer, &activity, "Announce").await;
+}
+
+/// Fan an un-boost out to every follower as an `Undo` of the prior `Announce`. Spawned by the
+/// un-boost handler; the local boost row is already gone.
+pub async fn deliver_undo_announce(
+    client: reqwest::Client,
+    cfg: Arc<Config>,
+    store: Arc<dyn Store>,
+    signer: Arc<Signer>,
+    note_uri: String,
+) {
+    let stamp = crate::now_nanos().to_string();
+    let activity = undo_announce_activity(&cfg, &note_uri, &stamp);
+    fan_out(&client, &store, &signer, &activity, "Undo(Announce)").await;
 }

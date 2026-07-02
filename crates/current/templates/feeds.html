@@ -50,11 +50,17 @@
     </section>
 
     <section class="card">
+      <div class="card__head"><h2>Categories</h2></div>
+      <div class="card__body">
+        <p class="sub">Group your feeds. Categories order your subscriptions below and the river shows unread counts per group.</p>
+        {{CATEGORIES}}
+      </div>
+    </section>
+
+    <section class="card">
       <div class="card__head"><h2>Your subscriptions</h2></div>
       <div class="card__body">
-        <ul class="feed-list">
-          {{FEEDS}}
-        </ul>
+        {{FEEDS}}
       </div>
     </section>
   </main>

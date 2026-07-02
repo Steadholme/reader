@@ -5,7 +5,7 @@
 //! ALWAYS those headers — never a client-supplied field. State-changing POSTs carry a double-
 //! submit CSRF token. Every feed/item string (remote, untrusted) is HTML-escaped on render.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Form, Json};
@@ -32,19 +32,83 @@ pub struct CsrfForm {
     pub csrf_token: String,
 }
 
+/// The `?filter=` query on the river. Normalized to `unread` (default) / `starred` / `all`.
+#[derive(Debug, Deserialize, Default)]
+pub struct RiverQuery {
+    #[serde(default)]
+    pub filter: String,
+}
+
+/// Normalize an arbitrary `filter` value to one of the three known views.
+fn normalize_filter(raw: &str) -> &'static str {
+    match raw {
+        "starred" => "starred",
+        "all" => "all",
+        _ => "unread",
+    }
+}
+
+/// Star-toggle form: the CSRF token plus the current filter view to return to.
+#[derive(Debug, Deserialize)]
+pub struct StarForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    #[serde(default)]
+    pub filter: String,
+}
+
 // ---------------------------------------------------------------------------
 // GET / — the river
 // ---------------------------------------------------------------------------
 
-/// `GET /` — newest unread items across all of the owner's feeds.
-pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
+/// `GET /` — the owner's items across all feeds under `?filter=unread|starred|all` (default unread).
+pub async fn index(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<RiverQuery>,
+) -> Result<Response, AppError> {
     let who = auth::identity(&headers);
     let now = now_secs();
     let csrf = auth::new_csrf_token();
-    let entries = state.store.river(&who.subject, RIVER_LIMIT).await?;
+    let filter = normalize_filter(&q.filter);
+    let entries = state
+        .store
+        .river_filtered(&who.subject, filter, RIVER_LIMIT)
+        .await?;
 
-    let html = render_river(&entries, &who.email, &csrf, now);
+    let html = render_river(&entries, &who.email, &csrf, now, filter);
     Ok(html_with_csrf(StatusCode::OK, html, &csrf))
+}
+
+// ---------------------------------------------------------------------------
+// POST /i/{id}/star — toggle the star/save flag (stay in the current filter view)
+// ---------------------------------------------------------------------------
+
+/// `POST /i/{id}/star` — CSRF-checked, owner-scoped; toggle the item's starred flag, then 303 back
+/// to the river preserving the current `filter` view. A foreign/missing item is a silent no-op.
+pub async fn star(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<StarForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    // Toggle relative to the current stored state (owner-scoped read, then owner-scoped write).
+    let now_starred = match state.store.get_item_owned(&id, &who.subject).await? {
+        Some(entry) => !entry.item.starred,
+        None => return Err(AppError::NotFound("No such item in your feeds.".to_string())),
+    };
+    state
+        .store
+        .set_item_starred(&id, &who.subject, now_starred)
+        .await?;
+    let filter = normalize_filter(&form.filter);
+    Ok(redirect_see_other(&format!("/?filter={filter}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -149,23 +213,41 @@ pub async fn item_summary(
 // Rendering
 // ---------------------------------------------------------------------------
 
-fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64) -> String {
+fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64, filter: &str) -> String {
     let count = entries.len();
-    let unread_label = if count >= RIVER_LIMIT as usize {
-        format!("{}+ unread", RIVER_LIMIT)
-    } else if count == 1 {
-        "1 unread".to_string()
+    // The count pill reads for the active view.
+    let noun = match filter {
+        "starred" => "starred",
+        "all" => "total",
+        _ => "unread",
+    };
+    let count_label = if count >= RIVER_LIMIT as usize {
+        format!("{}+ {noun}", RIVER_LIMIT)
     } else {
-        format!("{count} unread")
+        format!("{count} {noun}")
+    };
+
+    let empty_copy = match filter {
+        "starred" => (
+            "No starred items.",
+            "Star an item to save it here for later.",
+        ),
+        "all" => ("Nothing here yet.", "Items appear as your feeds update."),
+        _ => (
+            "You're all caught up.",
+            "New items appear here as your feeds update.",
+        ),
     };
 
     let list = if entries.is_empty() {
-        "<div class=\"empty\">\
-           <p class=\"empty__title\">You're all caught up.</p>\
-           <p class=\"empty__sub\">New items appear here as your feeds update. \
-             <a href=\"/feeds\">Manage feeds</a>.</p>\
-         </div>"
-            .to_string()
+        format!(
+            "<div class=\"empty\">\
+               <p class=\"empty__title\">{title}</p>\
+               <p class=\"empty__sub\">{sub} <a href=\"/feeds\">Manage feeds</a>.</p>\
+             </div>",
+            title = esc(empty_copy.0),
+            sub = esc(empty_copy.1),
+        )
     } else {
         // Collapse the same story carried by multiple feeds into one entry (non-destructive:
         // every unread item still lives in the store; this only folds the view). A cluster of
@@ -178,7 +260,7 @@ fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64) -> St
                 } else {
                     render_also(c)
                 };
-                render_entry(&c.head, csrf, now, &also)
+                render_entry(&c.head, csrf, now, &also, filter)
             })
             .collect::<Vec<_>>()
             .join("")
@@ -188,15 +270,41 @@ fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64) -> St
         .replace("{{CSS}}", APP_CSS)
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("river", Some(email)))
-        .replace("{{UNREAD}}", &esc(&unread_label))
+        .replace("{{UNREAD}}", &esc(&count_label))
+        .replace("{{FILTERS}}", &render_filters(filter))
         .replace("{{CSRF}}", &esc(csrf))
         .replace("{{ENTRIES}}", &list)
+}
+
+/// The Unread / Starred / All filter tabs (native `.tabs`/`.tab` kit). The active view carries
+/// `is-active`.
+fn render_filters(filter: &str) -> String {
+    let tab = |key: &str, label: &str| {
+        let active = if key == filter { " is-active" } else { "" };
+        let href = if key == "unread" {
+            "/".to_string()
+        } else {
+            format!("/?filter={key}")
+        };
+        format!(
+            "<a class=\"tab{active}\" href=\"{href}\">{label}</a>",
+            active = active,
+            href = href,
+            label = label,
+        )
+    };
+    format!(
+        "<nav class=\"tabs\">{}{}{}</nav>",
+        tab("unread", "Unread"),
+        tab("starred", "Starred"),
+        tab("all", "All"),
+    )
 }
 
 /// Render one river entry. `also` is the optional "also in N feeds" block injected for a cluster
 /// head (empty for a standalone item). When `also` is empty AND the item has no condensable
 /// content, the output is identical to the pre-dedup/-summary markup (additive-only).
-fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str) -> String {
+fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str, filter: &str) -> String {
     let item = &entry.item;
     let title = if item.title.trim().is_empty() {
         "(untitled)".to_string()
@@ -211,6 +319,12 @@ fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str) -> String 
         ),
         None => String::new(),
     };
+    // A small "Saved" pill on the head when the item is starred (visible in every filter view).
+    let starred_pill = if item.starred {
+        "<span class=\"pill pill-accent\">Saved</span>".to_string()
+    } else {
+        String::new()
+    };
     // Inline TL;DR: a locally-computed extractive 1–2 sentence condensation, shown only when the
     // stored summary actually has something to condense (more sentences than the TL;DR keeps),
     // so short items render exactly as before.
@@ -222,25 +336,33 @@ fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str) -> String 
     } else {
         format!("<p class=\"entry__summary\">{}</p>", esc(&item.summary))
     };
+    let star_label = if item.starred { "★ Unstar" } else { "☆ Star" };
 
     format!(
-        "<article class=\"entry\">\
+        "<article class=\"entry\" data-entry tabindex=\"-1\">\
            <div class=\"entry__head\">\
              <span class=\"feed-badge\">{feed}</span>\
+             {starred_pill}\
              {when}\
            </div>\
            <h2 class=\"entry__title\"><a href=\"/i/{id}\">{title}</a></h2>\
            {tldr}{summary}{also}\
            <div class=\"entry__actions\">\
              <a class=\"btn btn-secondary btn-sm\" href=\"/read/{id}\">Read</a>\
-             <a class=\"btn btn-ghost btn-sm\" href=\"/i/{id}\">Open &#8599;</a>\
-             <form class=\"inline-form\" method=\"post\" action=\"/i/{id}/read\">\
+             <a class=\"btn btn-ghost btn-sm\" data-open href=\"/i/{id}\">Open &#8599;</a>\
+             <form class=\"inline-form\" method=\"post\" action=\"/i/{id}/star\">\
+               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+               <input type=\"hidden\" name=\"filter\" value=\"{filter}\">\
+               <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{star_label}</button>\
+             </form>\
+             <form class=\"inline-form\" data-mark-read method=\"post\" action=\"/i/{id}/read\">\
                <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
                <button class=\"btn btn-ghost btn-sm\" type=\"submit\">Mark read</button>\
              </form>\
            </div>\
          </article>",
         feed = esc(&entry.feed_title),
+        starred_pill = starred_pill,
         when = when,
         id = esc(&item.id),
         title = esc(&title),
@@ -248,6 +370,8 @@ fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str) -> String 
         summary = summary,
         also = also,
         csrf = esc(csrf),
+        filter = esc(filter),
+        star_label = star_label,
     )
 }
 

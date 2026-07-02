@@ -20,17 +20,97 @@
     <div class="console__head console__head--row">
       <div>
         <h1>Your river</h1>
-        <p class="sub">Newest unread items across all your feeds · <span class="count-pill">{{UNREAD}}</span></p>
+        <p class="sub">Newest items across all your feeds · <span class="count-pill">{{UNREAD}}</span></p>
       </div>
-      <form method="post" action="/read-all">
-        <input type="hidden" name="csrf_token" value="{{CSRF}}">
-        <button class="btn btn-secondary btn-sm" type="submit">Mark all read</button>
-      </form>
+      <div class="entry__actions">
+        <button class="btn btn-ghost btn-sm" type="button" data-kbd-toggle aria-label="Keyboard shortcuts">? Shortcuts</button>
+        <form method="post" action="/read-all">
+          <input type="hidden" name="csrf_token" value="{{CSRF}}">
+          <button class="btn btn-secondary btn-sm" type="submit">Mark all read</button>
+        </form>
+      </div>
     </div>
+
+    {{FILTERS}}
 
     <section class="river">
       {{ENTRIES}}
     </section>
   </main>
+
+  <!-- Keyboard shortcuts help overlay. Hidden by default; with no JS it never appears, and the
+       list above still works entirely without scripting. -->
+  <div id="kbd-help" class="kbd-help" hidden>
+    <div class="kbd-help__card" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+      <div class="kbd-help__head">
+        <h2>Keyboard shortcuts</h2>
+        <button class="btn btn-ghost btn-sm" type="button" data-kbd-close aria-label="Close">Close</button>
+      </div>
+      <table class="data">
+        <tbody>
+          <tr><td><kbd>j</kbd></td><td>Next entry</td></tr>
+          <tr><td><kbd>k</kbd></td><td>Previous entry</td></tr>
+          <tr><td><kbd>o</kbd></td><td>Open entry</td></tr>
+          <tr><td><kbd>m</kbd></td><td>Mark entry read</td></tr>
+          <tr><td><kbd>r</kbd></td><td>Refresh</td></tr>
+          <tr><td><kbd>?</kbd></td><td>Toggle this help</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    var entries = Array.prototype.slice.call(document.querySelectorAll('[data-entry]'));
+    var cur = -1;
+    var help = document.getElementById('kbd-help');
+
+    function select(i) {
+      if (i < 0 || i >= entries.length) return;
+      if (cur >= 0 && entries[cur]) entries[cur].classList.remove('is-current');
+      cur = i;
+      var el = entries[cur];
+      el.classList.add('is-current');
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.focus({ preventScroll: true });
+    }
+    function toggleHelp(force) {
+      var show = typeof force === 'boolean' ? force : help.hasAttribute('hidden');
+      if (show) { help.removeAttribute('hidden'); } else { help.setAttribute('hidden', ''); }
+    }
+
+    var toggleBtn = document.querySelector('[data-kbd-toggle]');
+    if (toggleBtn) toggleBtn.addEventListener('click', function () { toggleHelp(); });
+    var closeBtn = document.querySelector('[data-kbd-close]');
+    if (closeBtn) closeBtn.addEventListener('click', function () { toggleHelp(false); });
+
+    document.addEventListener('keydown', function (e) {
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      switch (e.key) {
+        case 'j': e.preventDefault(); select(cur < 0 ? 0 : Math.min(cur + 1, entries.length - 1)); break;
+        case 'k': e.preventDefault(); if (cur > 0) select(cur - 1); break;
+        case 'o': {
+          e.preventDefault();
+          if (cur < 0) break;
+          var link = entries[cur].querySelector('[data-open]');
+          if (link) window.location.assign(link.getAttribute('href'));
+          break;
+        }
+        case 'm': {
+          e.preventDefault();
+          if (cur < 0) break;
+          var form = entries[cur].querySelector('[data-mark-read]');
+          if (form) form.submit();
+          break;
+        }
+        case 'r': e.preventDefault(); window.location.reload(); break;
+        case '?': e.preventDefault(); toggleHelp(); break;
+        case 'Escape': toggleHelp(false); break;
+      }
+    });
+  })();
+  </script>
 </body>
 </html>

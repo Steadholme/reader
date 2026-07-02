@@ -7,15 +7,22 @@
 //!
 //! Endpoints (served at the subdomain ROOT — Sluice forwards the path unmodified):
 //! - `GET /healthz` — liveness (public)
-//! - `GET /` — the unified river (newest unread items across all feeds)
+//! - `GET /` — the unified river; `?filter=unread|starred|all` toggles the view
 //! - `POST /read-all` — mark all read -> 303 `/` (CSRF)
 //! - `GET /i/{id}` — open: mark read -> 302 to the article link
 //! - `GET /read/{id}` — in-app reader: fetch+extract (SSRF-guarded) + cache full text, mark read
 //! - `POST /i/{id}/read` — mark one read -> 303 `/` (CSRF)
+//! - `POST /i/{id}/star` — toggle the star/save flag -> 303 `/?filter=…` (CSRF)
 //! - `GET /api/item/{id}/summary` — extractive 1–2 sentence summary of an item (JSON)
-//! - `GET /feeds` — manage feeds (add form + list)
+//! - `GET /feeds` — manage feeds (add form + categories + subscriptions grouped by category)
 //! - `POST /feeds` — add a feed by URL -> 303 `/feeds` (CSRF)
 //! - `POST /feeds/{id}/delete` — remove a feed -> 303 `/feeds` (CSRF)
+//! - `POST /feeds/{id}/category` — assign a feed to a category (or clear) -> 303 `/feeds` (CSRF)
+//! - `POST /feeds/{id}/full-content` — toggle per-feed full-content fetch -> 303 `/feeds` (CSRF)
+//! - `POST /categories` — create a category -> 303 `/feeds` (CSRF)
+//! - `POST /categories/{id}/rename` — rename a category -> 303 `/feeds` (CSRF)
+//! - `POST /categories/{id}/delete` — delete a category (feeds uncategorized) -> 303 `/feeds` (CSRF)
+//! - `POST /categories/{id}/move` — reorder a category up/down -> 303 `/feeds` (CSRF)
 //! - `GET /opml` — export all subscriptions as an OPML document (download)
 //! - `POST /opml` — import subscriptions from a pasted OPML document -> 303 `/feeds` (CSRF)
 
@@ -67,6 +74,7 @@ pub fn app(state: AppState) -> Router {
             get(handlers::river::open),
         )
         .route("/i/{id}/read", post(handlers::river::mark_read))
+        .route("/i/{id}/star", post(handlers::river::star))
         .route("/read/{id}", get(handlers::reader::read))
         .route(
             "/api/item/{id}/summary",
@@ -77,6 +85,21 @@ pub fn app(state: AppState) -> Router {
             get(handlers::feeds::list).post(handlers::feeds::add),
         )
         .route("/feeds/{id}/delete", post(handlers::feeds::remove))
+        .route("/feeds/{id}/category", post(handlers::feeds::assign_category))
+        .route(
+            "/feeds/{id}/full-content",
+            post(handlers::feeds::toggle_full_content),
+        )
+        .route("/categories", post(handlers::feeds::create_category))
+        .route(
+            "/categories/{id}/rename",
+            post(handlers::feeds::rename_category),
+        )
+        .route(
+            "/categories/{id}/delete",
+            post(handlers::feeds::delete_category),
+        )
+        .route("/categories/{id}/move", post(handlers::feeds::move_category))
         .route(
             "/opml",
             get(handlers::feeds::export_opml).post(handlers::feeds::import_opml),

@@ -370,3 +370,10 @@ hr { border:none; border-top:1px solid var(--border); margin:20px 0; }
 .note__edit > summary::-webkit-details-marker { display: none; }
 .note__editform { margin-top: 12px; min-width: min(100%, 420px); }
 .note__editform .composer__body { min-height: 72px; width: 100%; }
+
+/* --- Hashtags + boosts (wave-7) --- */
+.tagcloud { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.tag[href] { text-decoration: none; }
+.tag[href]:hover { filter: brightness(.97); }
+.note__body .tag { margin: 0 1px; }
+.note--boost { border-left: 3px solid var(--accent); }

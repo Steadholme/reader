@@ -453,6 +453,7 @@ pub async fn fetch_and_store(
             read: false,
             // The reader view lazily fills this on first open (feed bodies rarely carry full text).
             full_text: None,
+            starred: false,
         };
         if store.upsert_item(&item).await.map_err(|e| e.to_string())? {
             inserted += 1;

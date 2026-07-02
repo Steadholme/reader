@@ -235,6 +235,42 @@ pub fn follow_activity(cfg: &Config, remote_actor: &str, stamp: &str) -> Value {
     })
 }
 
+/// An `Announce` (boost/reblog) activity for a remote note object. `note_uri` is the boosted
+/// object's id; `note_actor` (the original author) rides the `cc` so the source is notified;
+/// `stamp` makes the activity id unique.
+pub fn announce_activity(cfg: &Config, note_uri: &str, note_actor: &str, stamp: &str) -> Value {
+    let mut cc = vec![json!(cfg.followers_url())];
+    if !note_actor.is_empty() {
+        cc.push(json!(note_actor));
+    }
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{}#announces/{}", cfg.actor_url(), stamp),
+        "type": "Announce",
+        "actor": cfg.actor_url(),
+        "published": crate::rfc3339(crate::now_secs()),
+        "to": [PUBLIC],
+        "cc": cc,
+        "object": note_uri
+    })
+}
+
+/// An `Undo` of a prior `Announce` (an un-boost). Carries a minimal `Announce` object referencing the
+/// same `note_uri`; `stamp` makes the activity id unique.
+pub fn undo_announce_activity(cfg: &Config, note_uri: &str, stamp: &str) -> Value {
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{}#undo-announce/{}", cfg.actor_url(), stamp),
+        "type": "Undo",
+        "actor": cfg.actor_url(),
+        "object": {
+            "type": "Announce",
+            "actor": cfg.actor_url(),
+            "object": note_uri
+        }
+    })
+}
+
 /// An `Accept` activity acknowledging an inbound `Follow`. `follow` is echoed back verbatim as the
 /// object (per the ActivityPub spec) and `stamp` makes the activity id unique.
 pub fn accept_activity(cfg: &Config, follow: &Value, stamp: &str) -> Value {

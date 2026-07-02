@@ -38,11 +38,58 @@ pub fn render_note_html(content: &str) -> String {
     esc(content).replace('\n', "<br>")
 }
 
+/// Render LOCAL note text with hashtags linkified to their `/tags/{tag}` page. Otherwise identical
+/// to [`render_note_html`]: every non-tag character is HTML-escaped and newlines become `<br>`, so
+/// no author markup survives. The escaping is done per-character in the SAME pass that recognizes
+/// tags, so an escaped entity like `&#x27;` can never be mistaken for a hashtag. Used ONLY for our
+/// own notes — remote/home content stays plain [`render_note_html`].
+pub fn render_note_html_tagged(content: &str) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        let at_boundary = i == 0 || !crate::hashtag::is_tag_char(chars[i - 1]);
+        if c == '#' && at_boundary {
+            let start = i + 1;
+            let mut j = start;
+            while j < n && crate::hashtag::is_tag_char(chars[j]) {
+                j += 1;
+            }
+            if j > start {
+                let tag: String = chars[start..j].iter().collect();
+                let lower = tag.to_lowercase();
+                // `lower` is all `[A-Za-z0-9_]` (URL-safe); escape both for defense in depth.
+                out.push_str(&format!(
+                    "<a class=\"tag\" href=\"/tags/{href}\">#{label}</a>",
+                    href = esc(&lower),
+                    label = esc(&tag),
+                ));
+                i = j;
+                continue;
+            }
+        }
+        match c {
+            '\n' => out.push_str("<br>"),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+    out
+}
+
 /// The 3x3 "All apps" grid glyph for the apex-portal back link (also the All-apps menu item).
 const ALLAPPS_SVG: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>"##;
 /// Lucide-style line icons for the app-bar nav + user menu.
 const ICON_USER: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"##;
 const ICON_HOME: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>"##;
+const ICON_LIST: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>"##;
 const ICON_CARET: &str = r##"<svg class="usermenu__caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>"##;
 const ICON_LOGOUT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>"##;
 
@@ -52,8 +99,14 @@ const ICON_LOGOUT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="curre
 /// logout route/method are preserved exactly (a GET link to the gateway) as a danger menu item;
 /// with no gateway identity (public/error chrome) the avatar falls back to a neutral glyph.
 pub fn topbar(page_title: &str, email: &str) -> String {
-    let profile_cls = if page_title == "Home" { "" } else { " is-active" };
+    // "Profile" is the default active section; Home / Lists highlight when selected.
+    let profile_cls = if page_title == "Home" || page_title == "Lists" {
+        ""
+    } else {
+        " is-active"
+    };
     let home_cls = if page_title == "Home" { " is-active" } else { "" };
+    let lists_cls = if page_title == "Lists" { " is-active" } else { "" };
     let ident = if email.is_empty() || email == "—" { "" } else { email };
     let (initials, name, sub) = identity_bits(ident);
     format!(
@@ -65,6 +118,7 @@ pub fn topbar(page_title: &str, email: &str) -> String {
   <nav class="appbar__nav">
     <a class="appnav{profile_cls}" href="/">{icon_user}Profile</a>
     <a class="appnav{home_cls}" href="/home">{icon_home}Home</a>
+    <a class="appnav{lists_cls}" href="/lists">{icon_list}Lists</a>
   </nav>
   <span class="appbar__spacer"></span>
   <div class="appbar__right">
@@ -85,8 +139,10 @@ pub fn topbar(page_title: &str, email: &str) -> String {
         shield = SHIELD_SVG,
         profile_cls = profile_cls,
         home_cls = home_cls,
+        lists_cls = lists_cls,
         icon_user = ICON_USER,
         icon_home = ICON_HOME,
+        icon_list = ICON_LIST,
         icon_caret = ICON_CARET,
         icon_logout = ICON_LOGOUT,
         allapps = ALLAPPS_SVG,

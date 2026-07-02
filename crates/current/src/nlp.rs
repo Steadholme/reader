@@ -231,6 +231,7 @@ mod tests {
                 published_at: Some(0),
                 read: false,
                 full_text: None,
+                starred: false,
             },
             feed_title: feed_title.into(),
         }

@@ -19,6 +19,8 @@ fn feed(id: &str, owner: &str, url: &str, title: &str) -> Feed {
         title: title.into(),
         last_fetched: None,
         created_at: now_secs(),
+        category_id: None,
+        full_content: false,
     }
 }
 
@@ -33,6 +35,7 @@ fn item(id: &str, feed_id: &str, guid: &str, title: &str, summary: &str) -> Item
         published_at: Some(now_secs()),
         read: false,
         full_text: None,
+        starred: false,
     }
 }
 

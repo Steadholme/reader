@@ -39,6 +39,8 @@ async fn fetches_and_parses_a_live_feed() {
             title: url.into(),
             last_fetched: None,
             created_at: now_secs(),
+            category_id: None,
+            full_content: false,
         };
         match fetch_and_store(&state.http, &store, &feed, now_secs()).await {
             Ok(n) => {

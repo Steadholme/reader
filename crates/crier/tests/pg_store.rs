@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use crier::store::{Follower, Note, PgStore, Profile, Store};
+use crier::store::{Boost, Follower, HomeNote, List, Note, PgStore, Profile, Store};
 use crier::{app, build_dev_state, now_secs, AppState};
 use tower::ServiceExt;
 
@@ -154,6 +154,106 @@ async fn pg_store_full_integration() {
         .await
         .expect("remove follower");
     assert_eq!(pg.count_followers().await, 0);
+
+    // --- wave-7: hashtags + boosts + lists (Postgres) ----------------------
+    // Hashtags on note_pg_2 (public): add (idempotent), query, top, remove.
+    pg.add_note_hashtags("note_pg_2", &["rust".to_string(), "webdev".to_string()])
+        .await
+        .expect("add tags");
+    pg.add_note_hashtags("note_pg_2", &["rust".to_string()]).await.expect("re-add tag idempotent");
+    assert!(pg.notes_with_tag("rust").await.iter().any(|n| n.id == "note_pg_2"));
+    assert!(pg.top_tags(10).await.iter().any(|(t, c)| t == "rust" && *c == 1));
+    pg.remove_note_hashtags("note_pg_2").await.expect("remove tags");
+    assert!(pg.notes_with_tag("rust").await.is_empty());
+
+    // Boosts: seed a home note, boost it (dedup on note_uri), then un-boost.
+    pg.add_home_note(&HomeNote {
+        id: "https://remote.example/notes/z1".to_string(),
+        actor: "https://remote.example/users/zoe".to_string(),
+        content: "hi".to_string(),
+        url: "https://remote.example/notes/z1".to_string(),
+        published: 0,
+        received_at: now,
+    })
+    .await
+    .expect("home note");
+    assert_eq!(
+        pg.get_home_note("https://remote.example/notes/z1").await.unwrap().actor,
+        "https://remote.example/users/zoe"
+    );
+    pg.add_boost(&Boost {
+        id: "boost_pg_1".to_string(),
+        note_uri: "https://remote.example/notes/z1".to_string(),
+        actor: "https://remote.example/users/zoe".to_string(),
+        content: "hi".to_string(),
+        url: "https://remote.example/notes/z1".to_string(),
+        created_at: now,
+    })
+    .await
+    .expect("boost");
+    pg.add_boost(&Boost {
+        id: "boost_pg_2".to_string(),
+        note_uri: "https://remote.example/notes/z1".to_string(),
+        actor: "x".to_string(),
+        content: "x".to_string(),
+        url: "x".to_string(),
+        created_at: now + 1,
+    })
+    .await
+    .expect("dup boost");
+    assert_eq!(pg.list_boosts().await.len(), 1, "one boost per note_uri");
+    assert!(pg.is_boosted("https://remote.example/notes/z1").await);
+    pg.remove_boost("https://remote.example/notes/z1").await.expect("unboost");
+    assert!(!pg.is_boosted("https://remote.example/notes/z1").await);
+
+    // Lists: create (id conflict), owner-scope, member add/filter/remove, delete.
+    pg.create_list(&List {
+        id: "list_pg_1".to_string(),
+        owner_sub: "u_w33d".to_string(),
+        name: "Devs".to_string(),
+        created_at: now,
+    })
+    .await
+    .expect("create list");
+    assert!(matches!(
+        pg.create_list(&List {
+            id: "list_pg_1".to_string(),
+            owner_sub: "u_w33d".to_string(),
+            name: "Dup".to_string(),
+            created_at: now,
+        })
+        .await,
+        Err(crier::store::StoreError::Conflict(_))
+    ));
+    assert_eq!(pg.list_lists("u_w33d").await.len(), 1);
+    assert!(pg.get_list("list_pg_1", "u_w33d").await.is_some());
+    assert!(pg.get_list("list_pg_1", "u_intruder").await.is_none(), "list is owner-scoped");
+    assert!(
+        !pg.add_list_member("list_pg_1", "u_intruder", "https://remote.example/users/zoe")
+            .await
+            .expect("foreign add"),
+        "foreign owner cannot add a member"
+    );
+    assert!(pg
+        .add_list_member("list_pg_1", "u_w33d", "https://remote.example/users/zoe")
+        .await
+        .expect("add member"));
+    assert_eq!(
+        pg.list_members("list_pg_1").await,
+        vec!["https://remote.example/users/zoe".to_string()]
+    );
+    assert!(pg
+        .list_home_notes_for_list("list_pg_1")
+        .await
+        .iter()
+        .any(|n| n.id == "https://remote.example/notes/z1"));
+    assert!(pg
+        .remove_list_member("list_pg_1", "u_w33d", "https://remote.example/users/zoe")
+        .await
+        .expect("remove member"));
+    assert!(pg.list_home_notes_for_list("list_pg_1").await.is_empty());
+    assert!(pg.delete_list("list_pg_1", "u_w33d").await.expect("delete list"));
+    assert!(pg.get_list("list_pg_1", "u_w33d").await.is_none());
 
     // --- full HTTP flow through the PG-backed app --------------------------
     let mut state: AppState = build_dev_state();

@@ -66,6 +66,11 @@ pub async fn read(
 
 /// Decide what readable text to show: cached full text, a fresh fetch+extract (cached on success),
 /// or the feed summary. Never errors — a fetch failure degrades to the summary.
+///
+/// When the owning feed has the per-feed "fetch full content" toggle set, the readability extractor
+/// runs on EVERY open (even a long summary) and the body is cached in the `entry_content` table.
+/// Otherwise the pre-existing behavior holds: extract only when the summary is short, caching to the
+/// item's `full_text` column.
 async fn resolve_content(
     state: &AppState,
     owner_sub: &str,
@@ -73,7 +78,7 @@ async fn resolve_content(
 ) -> (Vec<String>, Source) {
     let item = &entry.item;
 
-    // 1) Already cached -> render straight from the store.
+    // 1) Already cached on the item -> render straight from the store (pre-existing cache).
     if let Some(cached) = item.full_text.as_deref() {
         let paras = article::cache_to_paragraphs(cached);
         if !paras.is_empty() {
@@ -81,15 +86,31 @@ async fn resolve_content(
         }
     }
 
-    // 2) Enough stored content already, or no usable link -> just show the summary.
+    // 2) Per-entry full-content cache (populated by the full-content toggle path) -> render it.
+    if let Ok(Some(cached)) = state.store.get_entry_content(&item.id, owner_sub).await {
+        let paras = article::cache_to_paragraphs(&cached);
+        if !paras.is_empty() {
+            return (paras, Source::Cached);
+        }
+    }
+
+    // The owning feed's toggle: when on, always attempt the full-content fetch.
+    let full_content = match state.store.get_feed(&item.feed_id).await {
+        Ok(Some(f)) => f.owner_sub == owner_sub && f.full_content,
+        _ => false,
+    };
+
+    // 3) Decide whether to fetch: the toggle forces it; otherwise only a short summary triggers it.
+    //    Either way we need a usable link.
     let short = item.summary.chars().count() <= READER_SHORT_CONTENT_CHARS;
     let link = safe_link(&item.link);
-    if !short || link.is_none() {
+    if !(full_content || short) || link.is_none() {
         return (summary_paragraphs(&item.summary), Source::Summary);
     }
     let link = link.expect("checked is_some above");
 
-    // 3) Fetch + extract, caching on success. Any failure falls back to the summary.
+    // 4) Fetch + extract, caching on success. Any failure falls back to the summary. The full-content
+    //    toggle caches into `entry_content`; the legacy short-summary path caches into `full_text`.
     match article::fetch_article(&link).await {
         Ok(body) => {
             let paras = article::extract_readable(&body);
@@ -98,7 +119,12 @@ async fn resolve_content(
                 (summary_paragraphs(&item.summary), Source::Summary)
             } else {
                 let cache = article::paragraphs_to_cache(&paras);
-                if let Err(e) = state.store.set_item_full_text(&item.id, owner_sub, &cache).await {
+                let write = if full_content {
+                    state.store.set_entry_content(&item.id, owner_sub, &cache).await
+                } else {
+                    state.store.set_item_full_text(&item.id, owner_sub, &cache).await
+                };
+                if let Err(e) = write {
                     tracing::warn!(item = item.id, error = %e, "reader: cache write failed");
                 }
                 (paras, Source::Fetched)

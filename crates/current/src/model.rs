@@ -20,6 +20,13 @@ pub struct Feed {
     pub last_fetched: Option<i64>,
     /// Subscription time, epoch seconds.
     pub created_at: i64,
+    /// Owning category id (`feed_categories.id`), or `None` when the feed is uncategorized. The
+    /// river/feed list groups feeds under their category; a dangling id (category deleted) reads as
+    /// uncategorized in the grouped view.
+    pub category_id: Option<String>,
+    /// When true, opening an entry of this feed always runs the readability extractor and caches the
+    /// full body (see `entry_content`) instead of showing the truncated RSS summary. Default off.
+    pub full_content: bool,
 }
 
 /// A single fetched item/entry. Deduplicated per feed by `guid` (the `UNIQUE(feed_id, guid)`
@@ -42,10 +49,27 @@ pub struct Item {
     pub published_at: Option<i64>,
     /// Whether the owner has read/opened this item.
     pub read: bool,
+    /// Whether the owner has starred/saved this item (independent of `read`).
+    pub starred: bool,
     /// Cached full readable article text (plain text, newline-separated paragraphs), lazily
     /// populated by the in-app reader view when it fetches the item link. `None` = not yet
     /// extracted (the reader falls back to `summary`).
     pub full_text: Option<String>,
+}
+
+/// A user-defined feed category/group. The `(owner_sub, name)` pair is unique, so the same person
+/// cannot create two categories with the same name. `position` orders the groups on the feed list
+/// (ascending; ties broken by name).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Category {
+    /// Random, URL-safe id (primary key + the `/categories/{id}/…` slug).
+    pub id: String,
+    /// Owner subject from `X-Auth-Subject` (ownership key; never client-supplied).
+    pub owner_sub: String,
+    /// Human display name.
+    pub name: String,
+    /// Sort position among the owner's categories (ascending).
+    pub position: i64,
 }
 
 /// One row of the unified river: an unread item plus its feed's display title (the join the

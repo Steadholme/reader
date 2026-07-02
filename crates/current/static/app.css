@@ -439,3 +439,13 @@ hr { border:none; border-top:1px solid var(--border); margin:20px 0; }
 .reader__body { font-size: 17px; line-height: 1.75; color: var(--ink); }
 .reader__p { margin: 0 0 20px; }
 .reader__empty { margin: 0; color: var(--ink-2); font-size: 15px; }
+
+/* --- River keyboard navigation + shortcuts overlay (wave-7) --- */
+.entry.is-current { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--r); }
+.entry[data-entry]:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
+.kbd-help { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(15, 23, 42, .45); z-index: 50; }
+.kbd-help[hidden] { display: none; }
+.kbd-help__card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); box-shadow: var(--sh); padding: 20px 22px; max-width: 380px; width: calc(100% - 32px); }
+.kbd-help__head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 12px; }
+.kbd-help__head h2 { margin: 0; font-size: 17px; font-weight: 600; }
+kbd { display: inline-block; min-width: 20px; text-align: center; padding: 1px 7px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 6px; background: var(--surface-2); font: 600 12px/1.6 var(--mono, ui-monospace, monospace); color: var(--ink); }

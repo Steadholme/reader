@@ -34,6 +34,7 @@ pub mod config;
 pub mod error;
 pub mod federation;
 pub mod handlers;
+pub mod hashtag;
 pub mod httpsig;
 pub mod store;
 
@@ -76,6 +77,22 @@ pub fn app(state: AppState) -> Router {
         .route("/api/notes/{id}/delete", post(handlers::web::delete_note))
         .route("/api/follow", post(handlers::web::follow_remote))
         .route("/api/profile", post(handlers::web::set_profile))
+        .route("/api/boost", post(handlers::web::boost))
+        .route("/api/unboost", post(handlers::web::unboost))
+        // Hashtag pages (SSO web surface).
+        .route("/tags/{tag}", get(handlers::web::tag_page))
+        // User-defined lists + their filtered timelines (SSO web surface).
+        .route(
+            "/lists",
+            get(handlers::web::lists_index).post(handlers::web::create_list),
+        )
+        .route("/lists/{id}", get(handlers::web::list_detail))
+        .route("/lists/{id}/delete", post(handlers::web::delete_list))
+        .route("/lists/{id}/members", post(handlers::web::add_list_member))
+        .route(
+            "/lists/{id}/members/remove",
+            post(handlers::web::remove_list_member),
+        )
         // --- SSO admin surface (gated on admin group membership; non-admins get 403) ---
         .route("/admin", get(handlers::admin::panel))
         .route("/admin/block", post(handlers::admin::add_block))

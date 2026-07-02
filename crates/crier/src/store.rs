@@ -121,6 +121,37 @@ pub struct Profile {
     pub header_url: String,
 }
 
+/// A local boost/reblog of a note from the home timeline (maps 1:1 to a `boosts` row). Keyed on the
+/// boosted object's `note_uri` (one boost per note), with a snapshot of the original so the boost
+/// renders in the timeline even if the source home note is later pruned.
+#[derive(Clone, Debug)]
+pub struct Boost {
+    /// Random local id for the boost (the PRIMARY KEY + the Announce activity stamp base).
+    pub id: String,
+    /// The boosted note's object id URL (UNIQUE — dedupes / gates un-boost).
+    pub note_uri: String,
+    /// The ORIGINAL author's actor id URL (rendered as "boosted <actor>").
+    pub actor: String,
+    /// A snapshot of the boosted note's HTML content (rendered escaped in the UI).
+    pub content: String,
+    /// A human URL for the boosted note.
+    pub url: String,
+    pub created_at: i64,
+}
+
+/// A user-defined list of followed actors (maps 1:1 to a `lists` row). Owner-scoped: the single SSO
+/// user owns their lists. Members live in `list_members`.
+#[derive(Clone, Debug)]
+pub struct List {
+    /// Random local id (the PRIMARY KEY + the `/lists/{id}` slug).
+    pub id: String,
+    /// Owner subject from `X-Auth-Subject` (ownership key; never client-supplied).
+    pub owner_sub: String,
+    /// Human display name.
+    pub name: String,
+    pub created_at: i64,
+}
+
 /// Storage failure surfaced to the handler layer.
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -204,6 +235,61 @@ pub trait Store: Send + Sync {
     async fn list_home_notes(&self) -> Vec<HomeNote>;
     /// Record a delivered remote note. Idempotent on the note id (a re-delivery is dropped).
     async fn add_home_note(&self, note: &HomeNote) -> Result<(), StoreError>;
+    /// One home-timeline note by its object id (used to snapshot a note when boosting it).
+    async fn get_home_note(&self, id: &str) -> Option<HomeNote>;
+
+    // --- Hashtags ---------------------------------------------------------------------
+
+    /// Record the (lower-cased) hashtags parsed from a note. Idempotent per `(note_id, tag)`.
+    async fn add_note_hashtags(&self, note_id: &str, tags: &[String]) -> Result<(), StoreError>;
+    /// Drop all hashtags for a note (used on edit/delete before re-parsing).
+    async fn remove_note_hashtags(&self, note_id: &str) -> Result<(), StoreError>;
+    /// Public notes carrying `tag`, newest-first, capped at [`LIST_LIMIT`].
+    async fn notes_with_tag(&self, tag: &str) -> Vec<Note>;
+    /// The most-used tags across public notes: `(tag, count)`, count-desc then tag-asc, capped.
+    async fn top_tags(&self, limit: i64) -> Vec<(String, i64)>;
+
+    // --- Boosts / reblogs -------------------------------------------------------------
+
+    /// Record a boost. Idempotent on `note_uri` (a re-boost is a no-op).
+    async fn add_boost(&self, boost: &Boost) -> Result<(), StoreError>;
+    /// Remove a boost by the boosted note uri (an un-boost).
+    async fn remove_boost(&self, note_uri: &str) -> Result<(), StoreError>;
+    /// All boosts, newest-first, capped at [`LIST_LIMIT`].
+    async fn list_boosts(&self) -> Vec<Boost>;
+    /// True when `note_uri` is currently boosted (gates the boost/un-boost button state).
+    async fn is_boosted(&self, note_uri: &str) -> bool;
+
+    // --- Lists ------------------------------------------------------------------------
+
+    /// Create a list. Errors [`StoreError::Conflict`] if the id is taken.
+    async fn create_list(&self, list: &List) -> Result<(), StoreError>;
+    /// Delete a list (and its members), owner-scoped. `true` when it existed AND was owned.
+    async fn delete_list(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
+    /// An owner's lists, newest-first.
+    async fn list_lists(&self, owner_sub: &str) -> Vec<List>;
+    /// One list by id, owner-scoped (`None` for a missing or foreign list).
+    async fn get_list(&self, id: &str, owner_sub: &str) -> Option<List>;
+    /// Add a member (a followed actor) to a list, owner-scoped. `true` when the list is owned and the
+    /// member was newly added (idempotent per `(list_id, actor)`).
+    async fn add_list_member(
+        &self,
+        list_id: &str,
+        owner_sub: &str,
+        actor: &str,
+    ) -> Result<bool, StoreError>;
+    /// Remove a member from a list, owner-scoped. `true` when the list is owned (removal is a no-op
+    /// when the actor was not a member).
+    async fn remove_list_member(
+        &self,
+        list_id: &str,
+        owner_sub: &str,
+        actor: &str,
+    ) -> Result<bool, StoreError>;
+    /// The member actor ids of a list.
+    async fn list_members(&self, list_id: &str) -> Vec<String>;
+    /// Home-timeline notes authored by a list's members, newest-first, capped at [`LIST_LIMIT`].
+    async fn list_home_notes_for_list(&self, list_id: &str) -> Vec<HomeNote>;
 }
 
 // --------------------------------------------------------------------------------------
@@ -219,6 +305,12 @@ pub struct InMemoryStore {
     actor_key: Mutex<Option<ActorKey>>,
     following: Mutex<Vec<Following>>,
     home_notes: Mutex<Vec<HomeNote>>,
+    /// `(note_id, tag)` pairs (tag lower-cased).
+    hashtags: Mutex<Vec<(String, String)>>,
+    boosts: Mutex<Vec<Boost>>,
+    lists: Mutex<Vec<List>>,
+    /// `(list_id, actor)` membership pairs.
+    list_members: Mutex<Vec<(String, String)>>,
 }
 
 impl InMemoryStore {
@@ -436,6 +528,219 @@ impl Store for InMemoryStore {
         h.push(note.clone());
         Ok(())
     }
+
+    async fn get_home_note(&self, id: &str) -> Option<HomeNote> {
+        self.home_notes
+            .lock()
+            .expect("home_notes lock poisoned")
+            .iter()
+            .find(|n| n.id == id)
+            .cloned()
+    }
+
+    async fn add_note_hashtags(&self, note_id: &str, tags: &[String]) -> Result<(), StoreError> {
+        let mut h = self.hashtags.lock().expect("hashtags lock poisoned");
+        for tag in tags {
+            if !h.iter().any(|(nid, t)| nid == note_id && t == tag) {
+                h.push((note_id.to_string(), tag.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    async fn remove_note_hashtags(&self, note_id: &str) -> Result<(), StoreError> {
+        self.hashtags
+            .lock()
+            .expect("hashtags lock poisoned")
+            .retain(|(nid, _)| nid != note_id);
+        Ok(())
+    }
+
+    async fn notes_with_tag(&self, tag: &str) -> Vec<Note> {
+        let ids: Vec<String> = {
+            let h = self.hashtags.lock().expect("hashtags lock poisoned");
+            h.iter()
+                .filter(|(_, t)| t == tag)
+                .map(|(nid, _)| nid.clone())
+                .collect()
+        };
+        let notes = self.notes.lock().expect("notes lock poisoned");
+        let mut v: Vec<Note> = notes
+            .iter()
+            .filter(|n| n.visibility == "public" && ids.contains(&n.id))
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+        v.truncate(LIST_LIMIT);
+        v
+    }
+
+    async fn top_tags(&self, limit: i64) -> Vec<(String, i64)> {
+        let public: std::collections::HashSet<String> = {
+            let notes = self.notes.lock().expect("notes lock poisoned");
+            notes
+                .iter()
+                .filter(|n| n.visibility == "public")
+                .map(|n| n.id.clone())
+                .collect()
+        };
+        let h = self.hashtags.lock().expect("hashtags lock poisoned");
+        let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (nid, tag) in h.iter() {
+            if public.contains(nid) {
+                *counts.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut v: Vec<(String, i64)> = counts.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v.truncate(limit.max(0) as usize);
+        v
+    }
+
+    async fn add_boost(&self, boost: &Boost) -> Result<(), StoreError> {
+        let mut b = self.boosts.lock().expect("boosts lock poisoned");
+        // Idempotent on the boosted note uri — a re-boost is a no-op.
+        if b.iter().any(|x| x.note_uri == boost.note_uri) {
+            return Ok(());
+        }
+        b.push(boost.clone());
+        Ok(())
+    }
+
+    async fn remove_boost(&self, note_uri: &str) -> Result<(), StoreError> {
+        self.boosts
+            .lock()
+            .expect("boosts lock poisoned")
+            .retain(|x| x.note_uri != note_uri);
+        Ok(())
+    }
+
+    async fn list_boosts(&self) -> Vec<Boost> {
+        let b = self.boosts.lock().expect("boosts lock poisoned");
+        let mut v: Vec<Boost> = b.clone();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+        v.truncate(LIST_LIMIT);
+        v
+    }
+
+    async fn is_boosted(&self, note_uri: &str) -> bool {
+        self.boosts
+            .lock()
+            .expect("boosts lock poisoned")
+            .iter()
+            .any(|x| x.note_uri == note_uri)
+    }
+
+    async fn create_list(&self, list: &List) -> Result<(), StoreError> {
+        let mut l = self.lists.lock().expect("lists lock poisoned");
+        if l.iter().any(|x| x.id == list.id) {
+            return Err(StoreError::Conflict(list.id.clone()));
+        }
+        l.push(list.clone());
+        Ok(())
+    }
+
+    async fn delete_list(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        let mut l = self.lists.lock().expect("lists lock poisoned");
+        let before = l.len();
+        l.retain(|x| !(x.id == id && x.owner_sub == owner_sub));
+        let removed = l.len() != before;
+        drop(l);
+        if removed {
+            self.list_members
+                .lock()
+                .expect("list_members lock poisoned")
+                .retain(|(lid, _)| lid != id);
+        }
+        Ok(removed)
+    }
+
+    async fn list_lists(&self, owner_sub: &str) -> Vec<List> {
+        let l = self.lists.lock().expect("lists lock poisoned");
+        let mut v: Vec<List> = l.iter().filter(|x| x.owner_sub == owner_sub).cloned().collect();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+        v
+    }
+
+    async fn get_list(&self, id: &str, owner_sub: &str) -> Option<List> {
+        self.lists
+            .lock()
+            .expect("lists lock poisoned")
+            .iter()
+            .find(|x| x.id == id && x.owner_sub == owner_sub)
+            .cloned()
+    }
+
+    async fn add_list_member(
+        &self,
+        list_id: &str,
+        owner_sub: &str,
+        actor: &str,
+    ) -> Result<bool, StoreError> {
+        let owned = self
+            .lists
+            .lock()
+            .expect("lists lock poisoned")
+            .iter()
+            .any(|x| x.id == list_id && x.owner_sub == owner_sub);
+        if !owned {
+            return Ok(false);
+        }
+        let mut m = self.list_members.lock().expect("list_members lock poisoned");
+        if !m.iter().any(|(lid, a)| lid == list_id && a == actor) {
+            m.push((list_id.to_string(), actor.to_string()));
+        }
+        Ok(true)
+    }
+
+    async fn remove_list_member(
+        &self,
+        list_id: &str,
+        owner_sub: &str,
+        actor: &str,
+    ) -> Result<bool, StoreError> {
+        let owned = self
+            .lists
+            .lock()
+            .expect("lists lock poisoned")
+            .iter()
+            .any(|x| x.id == list_id && x.owner_sub == owner_sub);
+        if !owned {
+            return Ok(false);
+        }
+        self.list_members
+            .lock()
+            .expect("list_members lock poisoned")
+            .retain(|(lid, a)| !(lid == list_id && a == actor));
+        Ok(true)
+    }
+
+    async fn list_members(&self, list_id: &str) -> Vec<String> {
+        let m = self.list_members.lock().expect("list_members lock poisoned");
+        m.iter()
+            .filter(|(lid, _)| lid == list_id)
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+
+    async fn list_home_notes_for_list(&self, list_id: &str) -> Vec<HomeNote> {
+        let members: Vec<String> = {
+            let m = self.list_members.lock().expect("list_members lock poisoned");
+            m.iter()
+                .filter(|(lid, _)| lid == list_id)
+                .map(|(_, a)| a.clone())
+                .collect()
+        };
+        let h = self.home_notes.lock().expect("home_notes lock poisoned");
+        let mut v: Vec<HomeNote> = h
+            .iter()
+            .filter(|n| members.contains(&n.actor))
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| b.received_at.cmp(&a.received_at).then_with(|| b.id.cmp(&a.id)));
+        v.truncate(LIST_LIMIT);
+        v
+    }
 }
 
 // --------------------------------------------------------------------------------------
@@ -569,6 +874,58 @@ impl PgStore {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_home_notes_received_at ON home_notes (received_at)")
             .execute(&self.pool)
             .await?;
+        // Hashtags parsed out of local notes: one row per (note, tag), tag lower-cased.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS note_hashtags (\
+                 note_id TEXT NOT NULL, \
+                 tag TEXT NOT NULL, \
+                 PRIMARY KEY (note_id, tag)\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_note_hashtags_tag ON note_hashtags (tag)")
+            .execute(&self.pool)
+            .await?;
+        // Boosts/reblogs of home-timeline notes (one per note_uri).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS boosts (\
+                 id TEXT PRIMARY KEY, \
+                 note_uri TEXT NOT NULL UNIQUE, \
+                 actor TEXT NOT NULL DEFAULT '', \
+                 content TEXT NOT NULL DEFAULT '', \
+                 url TEXT NOT NULL DEFAULT '', \
+                 created_at BIGINT NOT NULL\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_boosts_created_at ON boosts (created_at)")
+            .execute(&self.pool)
+            .await?;
+        // User-defined lists of followed actors + their membership.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS lists (\
+                 id TEXT PRIMARY KEY, \
+                 owner_sub TEXT NOT NULL, \
+                 name TEXT NOT NULL, \
+                 created_at BIGINT NOT NULL\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_lists_owner ON lists (owner_sub)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS list_members (\
+                 list_id TEXT NOT NULL, \
+                 actor TEXT NOT NULL, \
+                 PRIMARY KEY (list_id, actor)\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -920,6 +1277,271 @@ impl PgStore {
         .await?;
         Ok(())
     }
+
+    fn home_note_from_row(r: &sqlx::postgres::PgRow) -> Result<HomeNote, sqlx::Error> {
+        Ok(HomeNote {
+            id: r.try_get("id")?,
+            actor: r.try_get("actor")?,
+            content: r.try_get("content")?,
+            url: r.try_get("url")?,
+            published: r.try_get("published")?,
+            received_at: r.try_get("received_at")?,
+        })
+    }
+
+    fn boost_from_row(r: &sqlx::postgres::PgRow) -> Result<Boost, sqlx::Error> {
+        Ok(Boost {
+            id: r.try_get("id")?,
+            note_uri: r.try_get("note_uri")?,
+            actor: r.try_get("actor")?,
+            content: r.try_get("content")?,
+            url: r.try_get("url")?,
+            created_at: r.try_get("created_at")?,
+        })
+    }
+
+    fn list_from_row(r: &sqlx::postgres::PgRow) -> Result<List, sqlx::Error> {
+        Ok(List {
+            id: r.try_get("id")?,
+            owner_sub: r.try_get("owner_sub")?,
+            name: r.try_get("name")?,
+            created_at: r.try_get("created_at")?,
+        })
+    }
+
+    async fn get_home_note_async(&self, id: &str) -> Result<Option<HomeNote>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, actor, content, url, published, received_at FROM home_notes WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(Self::home_note_from_row(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn add_note_hashtags_async(&self, note_id: &str, tags: &[String]) -> Result<(), sqlx::Error> {
+        for tag in tags {
+            sqlx::query(
+                "INSERT INTO note_hashtags (note_id, tag) VALUES ($1, $2) \
+                 ON CONFLICT (note_id, tag) DO NOTHING",
+            )
+            .bind(note_id)
+            .bind(tag)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn remove_note_hashtags_async(&self, note_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM note_hashtags WHERE note_id = $1")
+            .bind(note_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn notes_with_tag_async(&self, tag: &str) -> Result<Vec<Note>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT n.id, n.author_sub, n.content, n.visibility, n.created_at, n.updated_at, \
+                    n.attachment_url \
+             FROM notes n JOIN note_hashtags h ON h.note_id = n.id \
+             WHERE h.tag = $1 AND n.visibility = 'public' \
+             ORDER BY n.created_at DESC, n.id DESC LIMIT $2",
+        )
+        .bind(tag)
+        .bind(LIST_LIMIT as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::note_from_row).collect()
+    }
+
+    async fn top_tags_async(&self, limit: i64) -> Result<Vec<(String, i64)>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT h.tag AS tag, COUNT(*) AS c \
+             FROM note_hashtags h JOIN notes n ON n.id = h.note_id \
+             WHERE n.visibility = 'public' \
+             GROUP BY h.tag ORDER BY c DESC, h.tag ASC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| Ok((r.try_get("tag")?, r.try_get("c")?)))
+            .collect()
+    }
+
+    async fn add_boost_async(&self, b: &Boost) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO boosts (id, note_uri, actor, content, url, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (note_uri) DO NOTHING",
+        )
+        .bind(&b.id)
+        .bind(&b.note_uri)
+        .bind(&b.actor)
+        .bind(&b.content)
+        .bind(&b.url)
+        .bind(b.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_boost_async(&self, note_uri: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM boosts WHERE note_uri = $1")
+            .bind(note_uri)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_boosts_async(&self) -> Result<Vec<Boost>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, note_uri, actor, content, url, created_at FROM boosts \
+             ORDER BY created_at DESC, id DESC LIMIT $1",
+        )
+        .bind(LIST_LIMIT as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::boost_from_row).collect()
+    }
+
+    async fn is_boosted_async(&self, note_uri: &str) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query("SELECT 1 AS one FROM boosts WHERE note_uri = $1")
+            .bind(note_uri)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    async fn create_list_async(&self, l: &List) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO lists (id, owner_sub, name, created_at) VALUES ($1, $2, $3, $4)")
+            .bind(&l.id)
+            .bind(&l.owner_sub)
+            .bind(&l.name)
+            .bind(l.created_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_list_async(&self, id: &str, owner_sub: &str) -> Result<bool, sqlx::Error> {
+        // Members first (no FK in portable SQL), then the owned list row.
+        sqlx::query(
+            "DELETE FROM list_members WHERE list_id IN \
+                 (SELECT id FROM lists WHERE id = $1 AND owner_sub = $2)",
+        )
+        .bind(id)
+        .bind(owner_sub)
+        .execute(&self.pool)
+        .await?;
+        let res = sqlx::query("DELETE FROM lists WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn list_lists_async(&self, owner_sub: &str) -> Result<Vec<List>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, owner_sub, name, created_at FROM lists \
+             WHERE owner_sub = $1 ORDER BY created_at DESC, id DESC",
+        )
+        .bind(owner_sub)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::list_from_row).collect()
+    }
+
+    async fn get_list_async(&self, id: &str, owner_sub: &str) -> Result<Option<List>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, owner_sub, name, created_at FROM lists WHERE id = $1 AND owner_sub = $2",
+        )
+        .bind(id)
+        .bind(owner_sub)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(Self::list_from_row(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn add_list_member_async(
+        &self,
+        list_id: &str,
+        owner_sub: &str,
+        actor: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let owned = sqlx::query("SELECT 1 AS one FROM lists WHERE id = $1 AND owner_sub = $2")
+            .bind(list_id)
+            .bind(owner_sub)
+            .fetch_optional(&self.pool)
+            .await?;
+        if owned.is_none() {
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO list_members (list_id, actor) VALUES ($1, $2) \
+             ON CONFLICT (list_id, actor) DO NOTHING",
+        )
+        .bind(list_id)
+        .bind(actor)
+        .execute(&self.pool)
+        .await?;
+        Ok(true)
+    }
+
+    async fn remove_list_member_async(
+        &self,
+        list_id: &str,
+        owner_sub: &str,
+        actor: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let owned = sqlx::query("SELECT 1 AS one FROM lists WHERE id = $1 AND owner_sub = $2")
+            .bind(list_id)
+            .bind(owner_sub)
+            .fetch_optional(&self.pool)
+            .await?;
+        if owned.is_none() {
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM list_members WHERE list_id = $1 AND actor = $2")
+            .bind(list_id)
+            .bind(actor)
+            .execute(&self.pool)
+            .await?;
+        Ok(true)
+    }
+
+    async fn list_members_async(&self, list_id: &str) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query("SELECT actor FROM list_members WHERE list_id = $1 ORDER BY actor ASC")
+            .bind(list_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(|r| r.try_get("actor")).collect()
+    }
+
+    async fn list_home_notes_for_list_async(
+        &self,
+        list_id: &str,
+    ) -> Result<Vec<HomeNote>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT hn.id, hn.actor, hn.content, hn.url, hn.published, hn.received_at \
+             FROM home_notes hn JOIN list_members lm ON lm.actor = hn.actor \
+             WHERE lm.list_id = $1 \
+             ORDER BY hn.received_at DESC, hn.id DESC LIMIT $2",
+        )
+        .bind(list_id)
+        .bind(LIST_LIMIT as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::home_note_from_row).collect()
+    }
 }
 
 /// True when a sqlx error is a UNIQUE/PK violation (Postgres SQLSTATE 23505).
@@ -1093,5 +1715,132 @@ impl Store for PgStore {
         self.add_home_note_async(note)
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn get_home_note(&self, id: &str) -> Option<HomeNote> {
+        self.get_home_note_async(id).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg get_home_note failed");
+            None
+        })
+    }
+
+    async fn add_note_hashtags(&self, note_id: &str, tags: &[String]) -> Result<(), StoreError> {
+        self.add_note_hashtags_async(note_id, tags)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn remove_note_hashtags(&self, note_id: &str) -> Result<(), StoreError> {
+        self.remove_note_hashtags_async(note_id)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn notes_with_tag(&self, tag: &str) -> Vec<Note> {
+        self.notes_with_tag_async(tag).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg notes_with_tag failed");
+            Vec::new()
+        })
+    }
+
+    async fn top_tags(&self, limit: i64) -> Vec<(String, i64)> {
+        self.top_tags_async(limit).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg top_tags failed");
+            Vec::new()
+        })
+    }
+
+    async fn add_boost(&self, boost: &Boost) -> Result<(), StoreError> {
+        self.add_boost_async(boost)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn remove_boost(&self, note_uri: &str) -> Result<(), StoreError> {
+        self.remove_boost_async(note_uri)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_boosts(&self) -> Vec<Boost> {
+        self.list_boosts_async().await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg list_boosts failed");
+            Vec::new()
+        })
+    }
+
+    async fn is_boosted(&self, note_uri: &str) -> bool {
+        self.is_boosted_async(note_uri).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg is_boosted failed");
+            false
+        })
+    }
+
+    async fn create_list(&self, list: &List) -> Result<(), StoreError> {
+        self.create_list_async(list).await.map_err(|e| {
+            if is_unique_violation(&e) {
+                StoreError::Conflict(list.id.clone())
+            } else {
+                StoreError::Backend(e.to_string())
+            }
+        })
+    }
+
+    async fn delete_list(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        self.delete_list_async(id, owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_lists(&self, owner_sub: &str) -> Vec<List> {
+        self.list_lists_async(owner_sub).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg list_lists failed");
+            Vec::new()
+        })
+    }
+
+    async fn get_list(&self, id: &str, owner_sub: &str) -> Option<List> {
+        self.get_list_async(id, owner_sub).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg get_list failed");
+            None
+        })
+    }
+
+    async fn add_list_member(
+        &self,
+        list_id: &str,
+        owner_sub: &str,
+        actor: &str,
+    ) -> Result<bool, StoreError> {
+        self.add_list_member_async(list_id, owner_sub, actor)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn remove_list_member(
+        &self,
+        list_id: &str,
+        owner_sub: &str,
+        actor: &str,
+    ) -> Result<bool, StoreError> {
+        self.remove_list_member_async(list_id, owner_sub, actor)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_members(&self, list_id: &str) -> Vec<String> {
+        self.list_members_async(list_id).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, "pg list_members failed");
+            Vec::new()
+        })
+    }
+
+    async fn list_home_notes_for_list(&self, list_id: &str) -> Vec<HomeNote> {
+        self.list_home_notes_for_list_async(list_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "pg list_home_notes_for_list failed");
+                Vec::new()
+            })
     }
 }

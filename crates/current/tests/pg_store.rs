@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use current::model::{Feed, Item};
+use current::model::{Category, Feed, Item};
 use current::store::{PgStore, Store};
 use current::{app, build_dev_state, now_secs, AppState};
 use tower::ServiceExt;
@@ -50,6 +50,8 @@ async fn pg_store_full_integration() {
         title: "https://example.com/rss".into(),
         last_fetched: None,
         created_at: now - 100,
+        category_id: None,
+        full_content: false,
     };
     assert!(pg.add_feed(&feed).await.expect("add feed"));
     // Same owner + url -> conflict (no-op).
@@ -83,6 +85,7 @@ async fn pg_store_full_integration() {
         published_at: Some(now - 50),
         read: false,
         full_text: None,
+        starred: false,
     };
     let it2 = Item {
         id: "item_pg_2".into(),
@@ -94,6 +97,7 @@ async fn pg_store_full_integration() {
         published_at: Some(now),
         read: false,
         full_text: None,
+        starred: false,
     };
     assert!(pg.upsert_item(&it1).await.expect("insert it1"));
     assert!(pg.upsert_item(&it2).await.expect("insert it2"));
@@ -131,6 +135,67 @@ async fn pg_store_full_integration() {
         cached.item.full_text.as_deref(),
         Some("Full body paragraph one.\n\nParagraph two.")
     );
+
+    // --- wave-7: categories + full-content + star + entry cache (Postgres) --
+    // Categories: create, dedup on (owner, name), rename.
+    assert!(pg
+        .add_category(&Category { id: "cat_pg_1".into(), owner_sub: owner.into(), name: "News".into(), position: 0 })
+        .await
+        .expect("add cat"));
+    assert!(!pg
+        .add_category(&Category { id: "cat_pg_dup".into(), owner_sub: owner.into(), name: "News".into(), position: 1 })
+        .await
+        .expect("dup cat"), "duplicate (owner,name) rejected");
+    assert_eq!(pg.list_categories(owner).await.expect("list cats").len(), 1);
+    assert!(pg.rename_category("cat_pg_1", owner, "Headlines").await.expect("rename"));
+
+    // Assign the feed to the owned category; a foreign category is rejected.
+    assert!(pg.assign_feed_category("feed_pg_1", owner, Some("cat_pg_1")).await.expect("assign"));
+    assert_eq!(
+        pg.get_feed("feed_pg_1").await.expect("gf").unwrap().category_id.as_deref(),
+        Some("cat_pg_1")
+    );
+    assert!(pg
+        .add_category(&Category { id: "cat_pg_foreign".into(), owner_sub: "u_bob".into(), name: "Zzz".into(), position: 0 })
+        .await
+        .expect("foreign cat"));
+    assert!(!pg
+        .assign_feed_category("feed_pg_1", owner, Some("cat_pg_foreign"))
+        .await
+        .expect("assign foreign"), "cannot assign to a foreign category");
+
+    // Full-content toggle.
+    assert!(pg.set_feed_full_content("feed_pg_1", owner, true).await.expect("fc"));
+    assert!(pg.get_feed("feed_pg_1").await.expect("gf2").unwrap().full_content);
+
+    // Star + filtered river (item_pg_2 is read at this point; item_pg_1 unread).
+    assert!(!pg.set_item_starred("item_pg_1", "intruder", true).await.expect("foreign star"));
+    assert!(pg.set_item_starred("item_pg_1", owner, true).await.expect("star"));
+    let starred = pg.river_filtered(owner, "starred", 100).await.expect("starred river");
+    assert_eq!(starred.len(), 1);
+    assert_eq!(starred[0].item.id, "item_pg_1");
+    assert!(starred[0].item.starred);
+    assert_eq!(pg.river_filtered(owner, "all", 100).await.expect("all river").len(), 2);
+    assert_eq!(pg.river_filtered(owner, "unread", 100).await.expect("unread river").len(), 1);
+
+    // Per-feed unread counts.
+    let counts = pg.feed_unread_counts(owner).await.expect("unread counts");
+    let cmap: std::collections::HashMap<String, i64> = counts.into_iter().collect();
+    assert_eq!(cmap.get("feed_pg_1"), Some(&1));
+
+    // Entry-content cache, owner-scoped both ways.
+    assert!(!pg.set_entry_content("item_pg_1", "intruder", "hax").await.expect("foreign ec"));
+    assert!(pg.set_entry_content("item_pg_1", owner, "Body one.\n\nBody two.").await.expect("ec"));
+    assert_eq!(
+        pg.get_entry_content("item_pg_1", owner).await.expect("gec").as_deref(),
+        Some("Body one.\n\nBody two.")
+    );
+    assert!(pg.get_entry_content("item_pg_1", "intruder").await.expect("foreign gec").is_none());
+
+    // Deleting the category uncategorizes the feed (never deletes it).
+    assert!(pg.delete_category("cat_pg_1", owner).await.expect("del cat"));
+    assert!(pg.get_feed("feed_pg_1").await.expect("gf3").unwrap().category_id.is_none());
+    pg.delete_category("cat_pg_foreign", "u_bob").await.expect("del foreign cat");
 
     // --- mark all read -----------------------------------------------------
     let n = pg.mark_all_read(owner).await.expect("mark all");
@@ -178,6 +243,7 @@ async fn pg_store_full_integration() {
         published_at: Some(now),
         read: false,
         full_text: None,
+        starred: false,
     })
     .await
     .expect("seed http item");
