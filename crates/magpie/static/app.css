@@ -530,3 +530,86 @@ hr { border:none; border-top:1px solid var(--border); margin:20px 0; }
   box-shadow: 0 4px 14px rgba(15, 23, 42, .08); padding: 8px 10px; }
 .btn[aria-busy="true"] { opacity: .62; pointer-events: none; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ============================================================================
+ * Saved views · combined filters · Sources facet (wave-5)
+ * Views bar lives between the search bar and the tabs: pinned views render as
+ * accent-soft pills, active filters as neutral outlined chips with a colored
+ * facet dot (tag = accent, site = info), and the save-view form stays at
+ * btn-sm scale so the strip never competes with the reading list below it.
+ * ========================================================================== */
+.saved-views { display: flex; flex-direction: column; gap: 8px; margin: 0 0 14px; }
+.saved-views:empty { display: none; }
+.saved-views__notice {
+  padding: 8px 12px; font-size: 12.5px; border-radius: var(--r-sm);
+  background: var(--warn-soft); border: 1px solid var(--warn-border); color: var(--warn-ink);
+}
+.saved-views__pins { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* One pinned view = whole span is the pill; link + ghost × share the tint. */
+.saved-view {
+  display: inline-flex; align-items: center; gap: 2px; height: 26px; padding: 0 4px 0 11px;
+  background: var(--accent-soft); border: 1px solid var(--accent-border); border-radius: var(--r-pill);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.saved-view:hover { background: var(--accent-soft-2); border-color: var(--accent-2); }
+.saved-view__link {
+  font-size: 12px; font-weight: 600; letter-spacing: .01em; color: var(--accent-ink);
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.saved-view__link:hover { text-decoration: none; color: var(--accent); }
+.saved-view__del { margin: 0; display: inline-flex; }
+.saved-view__remove {
+  width: 18px; height: 18px; padding: 0; display: grid; place-items: center;
+  border: 0; border-radius: 50%; background: transparent; cursor: pointer;
+  font: inherit; font-size: 13px; line-height: 1; color: var(--accent-ink); opacity: .55;
+  transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.saved-view__remove:hover { opacity: 1; background: var(--surface); color: var(--down-ink); }
+
+/* Active combined filters: neutral outlined chips, each clearable via ×. */
+.filter-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.filter-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 5px 0 9px;
+  font-size: 12px; font-weight: 550; color: var(--ink-2);
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: var(--r-pill);
+}
+.filter-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-4); }
+.filter-chip--tag::before { background: var(--accent); }
+.filter-chip--site::before { background: var(--info); }
+.filter-chip__remove {
+  width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%;
+  font-size: 12px; line-height: 1; color: var(--ink-4);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.filter-chip__remove:hover { background: var(--surface-3); color: var(--ink); text-decoration: none; }
+
+/* Save-view form: only rendered when a filter is active; btn-sm scale. */
+.save-view-form { display: flex; align-items: center; gap: 8px; margin: 0; }
+.save-view-form__name {
+  width: auto; flex: 0 1 220px; min-width: 120px; height: 32px; padding: 0 10px; font-size: 13px;
+}
+
+/* ---- Sources facet (/sites): dense rows inside the card shell ------------ */
+.source-list { list-style: none; margin: 0; padding: 0; }
+.source-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 8px; border-radius: var(--r-xs);
+  transition: background var(--dur) var(--ease);
+}
+.source-row:hover { background: var(--surface-2); }
+.source-row + .source-row { border-top: 1px solid var(--hairline); }
+.source-row__link {
+  flex: 1 1 auto; min-width: 0; font-size: 13.5px; font-weight: 550; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.source-row__link:hover { color: var(--accent-ink); text-decoration: none; }
+/* Neutral count so sixty rows of accent pills don't shout; .badge sets shape. */
+.source-row__count { background: var(--surface-3); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.source-row--empty { display: block; text-align: center; color: var(--ink-3); font-size: 14px; padding: 28px 8px; }
+.source-row--empty:hover { background: transparent; }
+
+@media (max-width: 720px) {
+  .save-view-form__name { flex: 1 1 auto; }
+  .saved-view__link { max-width: 130px; }
+}

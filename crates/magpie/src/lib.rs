@@ -7,8 +7,9 @@
 //!
 //! Endpoints (served at the subdomain ROOT — Sluice forwards the path unmodified):
 //! - `GET  /healthz` — liveness (public)
-//! - `GET  /` — reading list (views: all / unread / favorites / archive; `?tag=` view) + save form + bulk toolbar + bookmarklet
+//! - `GET  /` — reading list (views: all / unread / favorites / archive; optional `?tag=` / `?site=` filters) + save form + bulk toolbar + bookmarklet
 //! - `GET  /search?q=` — full-text search over title + extracted text (keyset-paginated)
+//! - `GET  /sites` — source/site facet list linking into `?site=` filters
 //! - `GET  /clip?u=` — bookmarklet landing: SSO confirm page that POSTs to `/clip`
 //! - `POST /clip` — fetch the URL, extract, save (with optional tags) -> 302 `/` (CSRF-checked)
 //! - `GET  /r/{id}` — clean reader view of the saved text; marks the clip read (auto-archives if enabled); shows highlights
@@ -22,6 +23,8 @@
 //! - `POST /bulk` — archive/unarchive/favorite/unfavorite/delete/tag many selected clips at once (CSRF-checked, owner-scoped)
 //! - `POST /progress/{id}` — persist reading progress percent (throttled AJAX from the reader) -> 204 (CSRF-checked)
 //! - `POST /settings` — set the owner's auto-archive-on-read preference -> 302 back (CSRF-checked)
+//! - `POST /views` — save the current filtered view -> 302 back (CSRF-checked)
+//! - `POST /views/{id}/delete` — delete one of your saved filtered views -> 302 `/` (CSRF-checked)
 //! - `GET  /export?format=md|json` — the owner's clips + highlights/notes as an inert attachment
 //! - `GET  /highlights` — every highlight the owner has made (aggregate), grouped by clip
 //! - `POST /highlight/{hid}/delete` — delete one of your highlights -> 302 back (CSRF-checked)
@@ -62,6 +65,7 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(handlers::health::healthz))
         .route("/", get(handlers::clips::index))
         .route("/search", get(handlers::clips::search))
+        .route("/sites", get(handlers::clips::sites))
         .route(
             "/clip",
             get(handlers::clips::clip_form).post(handlers::clips::clip_create),
@@ -79,6 +83,8 @@ pub fn app(state: AppState) -> Router {
         .route("/bulk", post(handlers::clips::bulk))
         .route("/progress/{id}", post(handlers::clips::set_progress))
         .route("/settings", post(handlers::clips::settings))
+        .route("/views", post(handlers::clips::save_view))
+        .route("/views/{id}/delete", post(handlers::clips::delete_view))
         .route("/export", get(handlers::clips::export))
         .route("/highlights", get(handlers::clips::highlights))
         .route(
@@ -146,7 +152,11 @@ pub async fn build_state_from_env() -> Result<AppState, String> {
             Arc::new(pg)
         }
         "memory" => Arc::new(InMemoryStore::new()),
-        other => return Err(format!("unknown MAGPIE_STORE={other} (use memory|postgres)")),
+        other => {
+            return Err(format!(
+                "unknown MAGPIE_STORE={other} (use memory|postgres)"
+            ))
+        }
     };
 
     Ok(AppState {

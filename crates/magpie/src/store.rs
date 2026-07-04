@@ -15,8 +15,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::config::LIST_LIMIT;
-use crate::model::{tags_contain, Clip, Cursor, Filter, Highlight};
+use crate::config::{LIST_LIMIT, MAX_SAVED_VIEWS};
+use crate::model::{Clip, ClipQuery, Cursor, Filter, Highlight, SavedView};
 
 /// Storage failure surfaced to the handler layer (mapped to a 500 `server_error`).
 #[derive(Debug, Error)]
@@ -38,8 +38,11 @@ pub trait Store: Send + Sync {
 
     /// Find an owner's existing clip for an exact URL (de-dup: re-clipping a saved URL updates
     /// the existing row instead of creating a duplicate).
-    async fn find_by_owner_url(&self, owner_sub: &str, url: &str)
-        -> Result<Option<Clip>, StoreError>;
+    async fn find_by_owner_url(
+        &self,
+        owner_sub: &str,
+        url: &str,
+    ) -> Result<Option<Clip>, StoreError>;
 
     /// An owner's clips for `filter`, newest-first, capped at [`LIST_LIMIT`].
     async fn list(&self, owner_sub: &str, filter: Filter) -> Result<Vec<Clip>, StoreError>;
@@ -47,6 +50,14 @@ pub trait Store: Send + Sync {
     /// An owner's NON-archived clips carrying `tag` (whole-token match), newest-first, capped at
     /// [`LIST_LIMIT`].
     async fn list_by_tag(&self, owner_sub: &str, tag: &str) -> Result<Vec<Clip>, StoreError>;
+
+    /// An owner's clips matching the structured query, newest-first, capped at `limit`.
+    async fn list_filtered(
+        &self,
+        owner_sub: &str,
+        query: &ClipQuery,
+        limit: usize,
+    ) -> Result<Vec<Clip>, StoreError>;
 
     /// Full-text-ish search over an owner's clips (`title` + extracted `content_text`,
     /// case-insensitive substring), newest-first, keyset-paginated: `before` is the last row of the
@@ -151,6 +162,20 @@ pub trait Store: Send + Sync {
     /// Delete an owner's highlight. Returns `true` when a row was removed (existed AND owned).
     async fn delete_highlight(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
 
+    // ---- saved filtered views -----------------------------------------------------------
+
+    /// Insert a saved filtered view. Returns `false` on id collision.
+    async fn create_saved_view(&self, view: &SavedView) -> Result<bool, StoreError>;
+
+    /// Owner's saved filtered views, oldest-first, capped at [`MAX_SAVED_VIEWS`].
+    async fn list_saved_views(&self, owner_sub: &str) -> Result<Vec<SavedView>, StoreError>;
+
+    /// Fetch a saved filtered view by id (ownership is enforced by the caller).
+    async fn get_saved_view(&self, id: &str) -> Result<Option<SavedView>, StoreError>;
+
+    /// Delete an owner's saved filtered view. Returns `true` when a row was removed.
+    async fn delete_saved_view(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError>;
+
     // ---- per-owner preferences -------------------------------------------------------
 
     /// Whether reading a clip should auto-archive it for this owner (default `false`).
@@ -170,6 +195,7 @@ pub trait Store: Send + Sync {
 pub struct InMemoryStore {
     clips: Mutex<Vec<Clip>>,
     highlights: Mutex<Vec<Highlight>>,
+    saved_views: Mutex<Vec<SavedView>>,
     /// Per-owner preferences: `(owner_sub, auto_archive_on_read)`.
     prefs: Mutex<Vec<(String, bool)>>,
 }
@@ -209,27 +235,50 @@ impl Store for InMemoryStore {
     }
 
     async fn list(&self, owner_sub: &str, filter: Filter) -> Result<Vec<Clip>, StoreError> {
+        self.list_filtered(
+            owner_sub,
+            &ClipQuery {
+                filter,
+                tag: None,
+                site: None,
+            },
+            LIST_LIMIT,
+        )
+        .await
+    }
+
+    async fn list_by_tag(&self, owner_sub: &str, tag: &str) -> Result<Vec<Clip>, StoreError> {
+        let tag = tag.trim().to_lowercase();
+        if tag.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.list_filtered(
+            owner_sub,
+            &ClipQuery {
+                filter: Filter::All,
+                tag: Some(tag),
+                site: None,
+            },
+            LIST_LIMIT,
+        )
+        .await
+    }
+
+    async fn list_filtered(
+        &self,
+        owner_sub: &str,
+        query: &ClipQuery,
+        limit: usize,
+    ) -> Result<Vec<Clip>, StoreError> {
         let clips = self.clips.lock().expect("clips lock poisoned");
         let mut out: Vec<Clip> = clips
             .iter()
-            .filter(|c| c.owner_sub == owner_sub && filter.matches(c))
+            .filter(|c| c.owner_sub == owner_sub && query.matches(c))
             .cloned()
             .collect();
         // Newest first; id as a deterministic tiebreak when saved_at collides (same second).
         out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.id.cmp(&a.id)));
-        out.truncate(LIST_LIMIT);
-        Ok(out)
-    }
-
-    async fn list_by_tag(&self, owner_sub: &str, tag: &str) -> Result<Vec<Clip>, StoreError> {
-        let clips = self.clips.lock().expect("clips lock poisoned");
-        let mut out: Vec<Clip> = clips
-            .iter()
-            .filter(|c| c.owner_sub == owner_sub && !c.archived && tags_contain(&c.tags, tag))
-            .cloned()
-            .collect();
-        out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.id.cmp(&a.id)));
-        out.truncate(LIST_LIMIT);
+        out.truncate(limit);
         Ok(out)
     }
 
@@ -410,7 +459,10 @@ impl Store for InMemoryStore {
         note: Option<String>,
     ) -> Result<bool, StoreError> {
         let mut hs = self.highlights.lock().expect("highlights lock poisoned");
-        match hs.iter_mut().find(|h| h.id == id && h.owner_sub == owner_sub) {
+        match hs
+            .iter_mut()
+            .find(|h| h.id == id && h.owner_sub == owner_sub)
+        {
             Some(h) => {
                 h.note = note;
                 Ok(true)
@@ -431,7 +483,11 @@ impl Store for InMemoryStore {
             .cloned()
             .collect();
         // Oldest-first (reading order); id as a deterministic tiebreak within the same second.
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         out.truncate(LIST_LIMIT);
         Ok(out)
     }
@@ -482,6 +538,43 @@ impl Store for InMemoryStore {
         Ok(hs.len() != before)
     }
 
+    async fn create_saved_view(&self, view: &SavedView) -> Result<bool, StoreError> {
+        let mut views = self.saved_views.lock().expect("saved views lock poisoned");
+        if views.iter().any(|v| v.id == view.id) {
+            return Ok(false);
+        }
+        views.push(view.clone());
+        Ok(true)
+    }
+
+    async fn list_saved_views(&self, owner_sub: &str) -> Result<Vec<SavedView>, StoreError> {
+        let views = self.saved_views.lock().expect("saved views lock poisoned");
+        let mut out: Vec<SavedView> = views
+            .iter()
+            .filter(|v| v.owner_sub == owner_sub)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out.truncate(MAX_SAVED_VIEWS);
+        Ok(out)
+    }
+
+    async fn get_saved_view(&self, id: &str) -> Result<Option<SavedView>, StoreError> {
+        let views = self.saved_views.lock().expect("saved views lock poisoned");
+        Ok(views.iter().find(|v| v.id == id).cloned())
+    }
+
+    async fn delete_saved_view(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        let mut views = self.saved_views.lock().expect("saved views lock poisoned");
+        let before = views.len();
+        views.retain(|v| !(v.id == id && v.owner_sub == owner_sub));
+        Ok(views.len() != before)
+    }
+
     async fn get_auto_archive(&self, owner_sub: &str) -> Result<bool, StoreError> {
         let prefs = self.prefs.lock().expect("prefs lock poisoned");
         Ok(prefs
@@ -519,10 +612,15 @@ const COLS: &str = "id, owner_sub, url, title, excerpt, content_text, site, save
 /// Column list shared by every highlight SELECT, so the row decoder stays in lock-step.
 const HL_COLS: &str = "id, clip_id, owner_sub, quote, note, created_at";
 
+/// Column list shared by every saved-view SELECT.
+const SV_COLS: &str = "id, owner_sub, name, query, created_at";
+
 /// Escape the LIKE metacharacters (`\`, `%`, `_`) in a user-supplied needle so it matches
 /// literally under `LIKE ... ESCAPE '\'`. Backslash first, so the escapes we add are not re-escaped.
 fn like_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// PostgreSQL-backed [`Store`]. Holds a pooled connection; the async trait methods drive sqlx
@@ -573,12 +671,16 @@ impl PgStore {
             .await?;
         // The favorite (starred) flag + the reading-progress percent. Both additive, idempotent,
         // portable standard SQL with NOT NULL defaults so existing rows backfill cleanly.
-        sqlx::query("ALTER TABLE clips ADD COLUMN IF NOT EXISTS favorite BOOLEAN NOT NULL DEFAULT FALSE")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("ALTER TABLE clips ADD COLUMN IF NOT EXISTS progress BIGINT NOT NULL DEFAULT 0")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "ALTER TABLE clips ADD COLUMN IF NOT EXISTS favorite BOOLEAN NOT NULL DEFAULT FALSE",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "ALTER TABLE clips ADD COLUMN IF NOT EXISTS progress BIGINT NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_clips_owner_saved \
              ON clips (owner_sub, saved_at)",
@@ -630,6 +732,24 @@ impl PgStore {
         )
         .execute(&self.pool)
         .await?;
+        // Saved filtered views: named, owner-scoped pins to canonical structured query strings.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS saved_views (\
+                 id TEXT PRIMARY KEY, \
+                 owner_sub TEXT NOT NULL, \
+                 name TEXT NOT NULL, \
+                 query TEXT NOT NULL, \
+                 created_at BIGINT NOT NULL\
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_saved_views_owner_created \
+             ON saved_views (owner_sub, created_at)",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -640,6 +760,16 @@ impl PgStore {
             owner_sub: row.try_get("owner_sub")?,
             quote: row.try_get("quote")?,
             note: row.try_get("note")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+
+    fn saved_view_from_row(row: &sqlx::postgres::PgRow) -> Result<SavedView, sqlx::Error> {
+        Ok(SavedView {
+            id: row.try_get("id")?,
+            owner_sub: row.try_get("owner_sub")?,
+            name: row.try_get("name")?,
+            query: row.try_get("query")?,
             created_at: row.try_get("created_at")?,
         })
     }
@@ -737,12 +867,58 @@ impl PgStore {
         rows.iter().map(Self::highlight_from_row).collect()
     }
 
-    async fn delete_highlight_async(
+    async fn delete_highlight_async(&self, id: &str, owner_sub: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM highlights WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn create_saved_view_async(&self, view: &SavedView) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "INSERT INTO saved_views (id, owner_sub, name, query, created_at) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&view.id)
+        .bind(&view.owner_sub)
+        .bind(&view.name)
+        .bind(&view.query)
+        .bind(view.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn list_saved_views_async(&self, owner_sub: &str) -> Result<Vec<SavedView>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SV_COLS} FROM saved_views \
+             WHERE owner_sub = $1 \
+             ORDER BY created_at ASC, id ASC LIMIT $2"
+        ))
+        .bind(owner_sub)
+        .bind(MAX_SAVED_VIEWS as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::saved_view_from_row).collect()
+    }
+
+    async fn get_saved_view_async(&self, id: &str) -> Result<Option<SavedView>, sqlx::Error> {
+        let row = sqlx::query(&format!("SELECT {SV_COLS} FROM saved_views WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(Self::saved_view_from_row).transpose()
+    }
+
+    async fn delete_saved_view_async(
         &self,
         id: &str,
         owner_sub: &str,
     ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query("DELETE FROM highlights WHERE id = $1 AND owner_sub = $2")
+        let result = sqlx::query("DELETE FROM saved_views WHERE id = $1 AND owner_sub = $2")
             .bind(id)
             .bind(owner_sub)
             .execute(&self.pool)
@@ -819,23 +995,16 @@ impl PgStore {
     }
 
     async fn list_async(&self, owner_sub: &str, filter: Filter) -> Result<Vec<Clip>, sqlx::Error> {
-        // Each view is a standard-SQL predicate over the boolean flags.
-        let predicate = match filter {
-            Filter::All => "archived = FALSE",
-            Filter::Unread => "archived = FALSE AND read = FALSE",
-            Filter::Favorites => "favorite = TRUE",
-            Filter::Archived => "archived = TRUE",
-        };
-        let rows = sqlx::query(&format!(
-            "SELECT {COLS} FROM clips \
-             WHERE owner_sub = $1 AND {predicate} \
-             ORDER BY saved_at DESC, id DESC LIMIT $2"
-        ))
-        .bind(owner_sub)
-        .bind(LIST_LIMIT as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(Self::clip_from_row).collect()
+        self.list_filtered_async(
+            owner_sub,
+            &ClipQuery {
+                filter,
+                tag: None,
+                site: None,
+            },
+            LIST_LIMIT,
+        )
+        .await
     }
 
     async fn list_by_tag_async(
@@ -843,21 +1012,63 @@ impl PgStore {
         owner_sub: &str,
         tag: &str,
     ) -> Result<Vec<Clip>, sqlx::Error> {
-        // Whole-token match against the normalized comma list: wrap both sides in commas so
-        // `,tag,` cannot match a substring of a neighbouring tag. `ESCAPE '\'` neutralizes any
-        // LIKE metacharacters in the token.
-        let pattern = format!("%,{},%", like_escape(&tag.trim().to_lowercase()));
-        let rows = sqlx::query(&format!(
-            "SELECT {COLS} FROM clips \
-             WHERE owner_sub = $1 AND archived = FALSE AND tags IS NOT NULL \
-               AND (',' || LOWER(tags) || ',') LIKE $2 ESCAPE '\\' \
-             ORDER BY saved_at DESC, id DESC LIMIT $3"
-        ))
-        .bind(owner_sub)
-        .bind(pattern)
-        .bind(LIST_LIMIT as i64)
-        .fetch_all(&self.pool)
-        .await?;
+        let tag = tag.trim().to_lowercase();
+        if tag.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.list_filtered_async(
+            owner_sub,
+            &ClipQuery {
+                filter: Filter::All,
+                tag: Some(tag),
+                site: None,
+            },
+            LIST_LIMIT,
+        )
+        .await
+    }
+
+    async fn list_filtered_async(
+        &self,
+        owner_sub: &str,
+        query: &ClipQuery,
+        limit: usize,
+    ) -> Result<Vec<Clip>, sqlx::Error> {
+        // Each base view is a standard-SQL predicate over the boolean flags. Optional filters are
+        // appended with positional binds so the statement stays portable over pgwire.
+        let predicate = match query.filter {
+            Filter::All => "archived = FALSE",
+            Filter::Unread => "archived = FALSE AND read = FALSE",
+            Filter::Favorites => "favorite = TRUE",
+            Filter::Archived => "archived = TRUE",
+        };
+        let mut sql = format!("SELECT {COLS} FROM clips WHERE owner_sub = $1 AND {predicate}");
+        let mut next = 2usize;
+        let tag_pattern = query
+            .tag
+            .as_ref()
+            .map(|tag| format!("%,{},%", like_escape(&tag.trim().to_lowercase())));
+        if tag_pattern.is_some() {
+            sql.push_str(&format!(
+                " AND tags IS NOT NULL AND (',' || LOWER(tags) || ',') LIKE ${next} ESCAPE '\\'"
+            ));
+            next += 1;
+        }
+        let site = query.site.as_ref().map(|site| site.trim().to_lowercase());
+        if site.is_some() {
+            sql.push_str(&format!(" AND LOWER(site) = ${next}"));
+            next += 1;
+        }
+        sql.push_str(&format!(" ORDER BY saved_at DESC, id DESC LIMIT ${next}"));
+
+        let mut q = sqlx::query(&sql).bind(owner_sub);
+        if let Some(pattern) = tag_pattern {
+            q = q.bind(pattern);
+        }
+        if let Some(site) = site {
+            q = q.bind(site);
+        }
+        let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
         rows.iter().map(Self::clip_from_row).collect()
     }
 
@@ -901,23 +1112,21 @@ impl PgStore {
         owner_sub: &str,
         tags: Option<String>,
     ) -> Result<bool, sqlx::Error> {
-        let result =
-            sqlx::query("UPDATE clips SET tags = $3 WHERE id = $1 AND owner_sub = $2")
-                .bind(id)
-                .bind(owner_sub)
-                .bind(&tags)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("UPDATE clips SET tags = $3 WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .bind(&tags)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
     async fn mark_read_async(&self, id: &str, owner_sub: &str) -> Result<bool, sqlx::Error> {
-        let result =
-            sqlx::query("UPDATE clips SET read = TRUE WHERE id = $1 AND owner_sub = $2")
-                .bind(id)
-                .bind(owner_sub)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("UPDATE clips SET read = TRUE WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -927,13 +1136,12 @@ impl PgStore {
         owner_sub: &str,
         archived: bool,
     ) -> Result<bool, sqlx::Error> {
-        let result =
-            sqlx::query("UPDATE clips SET archived = $3 WHERE id = $1 AND owner_sub = $2")
-                .bind(id)
-                .bind(owner_sub)
-                .bind(archived)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("UPDATE clips SET archived = $3 WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .bind(archived)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -943,13 +1151,12 @@ impl PgStore {
         owner_sub: &str,
         favorite: bool,
     ) -> Result<bool, sqlx::Error> {
-        let result =
-            sqlx::query("UPDATE clips SET favorite = $3 WHERE id = $1 AND owner_sub = $2")
-                .bind(id)
-                .bind(owner_sub)
-                .bind(favorite)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("UPDATE clips SET favorite = $3 WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .bind(favorite)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -959,13 +1166,12 @@ impl PgStore {
         owner_sub: &str,
         progress: i64,
     ) -> Result<bool, sqlx::Error> {
-        let result =
-            sqlx::query("UPDATE clips SET progress = $3 WHERE id = $1 AND owner_sub = $2")
-                .bind(id)
-                .bind(owner_sub)
-                .bind(progress)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("UPDATE clips SET progress = $3 WHERE id = $1 AND owner_sub = $2")
+            .bind(id)
+            .bind(owner_sub)
+            .bind(progress)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -1069,6 +1275,17 @@ impl Store for PgStore {
 
     async fn list_by_tag(&self, owner_sub: &str, tag: &str) -> Result<Vec<Clip>, StoreError> {
         self.list_by_tag_async(owner_sub, tag)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_filtered(
+        &self,
+        owner_sub: &str,
+        query: &ClipQuery,
+        limit: usize,
+    ) -> Result<Vec<Clip>, StoreError> {
+        self.list_filtered_async(owner_sub, query, limit)
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
@@ -1213,6 +1430,30 @@ impl Store for PgStore {
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    async fn create_saved_view(&self, view: &SavedView) -> Result<bool, StoreError> {
+        self.create_saved_view_async(view)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn list_saved_views(&self, owner_sub: &str) -> Result<Vec<SavedView>, StoreError> {
+        self.list_saved_views_async(owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn get_saved_view(&self, id: &str) -> Result<Option<SavedView>, StoreError> {
+        self.get_saved_view_async(id)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    async fn delete_saved_view(&self, id: &str, owner_sub: &str) -> Result<bool, StoreError> {
+        self.delete_saved_view_async(id, owner_sub)
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     async fn get_auto_archive(&self, owner_sub: &str) -> Result<bool, StoreError> {
         self.get_auto_archive_async(owner_sub)
             .await
@@ -1269,26 +1510,49 @@ mod tests {
         s.mark_read("b", "u").await.unwrap();
         s.create(&clip("c", "u", "https://c", 30)).await.unwrap();
         s.set_archived("c", "u", true).await.unwrap();
-        s.create(&clip("d", "other", "https://d", 40)).await.unwrap();
+        s.create(&clip("d", "other", "https://d", 40))
+            .await
+            .unwrap();
 
         let all = s.list("u", Filter::All).await.unwrap();
         // newest-first, archived + other-owner excluded
-        assert_eq!(all.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        assert_eq!(
+            all.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
 
         let unread = s.list("u", Filter::Unread).await.unwrap();
-        assert_eq!(unread.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(
+            unread.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
 
         let archived = s.list("u", Filter::Archived).await.unwrap();
-        assert_eq!(archived.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["c"]);
+        assert_eq!(
+            archived.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["c"]
+        );
     }
 
     #[tokio::test]
     async fn find_by_owner_url_scopes_to_owner() {
         let s = InMemoryStore::new();
         s.create(&clip("a", "u", "https://x", 1)).await.unwrap();
-        assert!(s.find_by_owner_url("u", "https://x").await.unwrap().is_some());
-        assert!(s.find_by_owner_url("u", "https://y").await.unwrap().is_none());
-        assert!(s.find_by_owner_url("other", "https://x").await.unwrap().is_none());
+        assert!(s
+            .find_by_owner_url("u", "https://x")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(s
+            .find_by_owner_url("u", "https://y")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(s
+            .find_by_owner_url("other", "https://x")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1303,11 +1567,70 @@ mod tests {
         s.set_archived("e", "u", true).await.unwrap();
 
         let rust = s.list_by_tag("u", "rust").await.unwrap();
-        assert_eq!(rust.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        assert_eq!(
+            rust.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
         // whole-token: "web" must not match "web-dev"-style substrings
         s.create(&tagged("f", "u", 60, "web-dev")).await.unwrap();
         let web = s.list_by_tag("u", "web").await.unwrap();
-        assert_eq!(web.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(
+            web.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_filtered_preserves_list_and_tag_identities() {
+        let s = InMemoryStore::new();
+        s.create(&tagged("a", "u", 10, "Rust,web")).await.unwrap();
+        s.create(&tagged("b", "u", 20, "rust,async")).await.unwrap();
+        s.create(&tagged("c", "u", 30, "gardening")).await.unwrap();
+        s.set_archived("c", "u", true).await.unwrap();
+
+        let all_q = ClipQuery {
+            filter: Filter::All,
+            tag: None,
+            site: None,
+        };
+        let filtered_all = s.list_filtered("u", &all_q, LIST_LIMIT).await.unwrap();
+        let old_all = s.list("u", Filter::All).await.unwrap();
+        assert_eq!(filtered_all, old_all);
+
+        let tag_q = ClipQuery {
+            filter: Filter::All,
+            tag: Some("rust".into()),
+            site: None,
+        };
+        let filtered_tag = s.list_filtered("u", &tag_q, LIST_LIMIT).await.unwrap();
+        let old_tag = s.list_by_tag("u", "rust").await.unwrap();
+        assert_eq!(filtered_tag, old_tag);
+    }
+
+    #[tokio::test]
+    async fn list_filtered_combines_view_tag_and_site() {
+        let s = InMemoryStore::new();
+        let mut a = tagged("a", "u", 10, "rust");
+        a.site = "Example News".into();
+        s.create(&a).await.unwrap();
+        let mut b = tagged("b", "u", 20, "rust");
+        b.site = "Other Site".into();
+        s.create(&b).await.unwrap();
+        let mut c = tagged("c", "u", 30, "rust");
+        c.site = "Example News".into();
+        c.favorite = true;
+        s.create(&c).await.unwrap();
+
+        let q = ClipQuery {
+            filter: Filter::Favorites,
+            tag: Some("rust".into()),
+            site: Some("example news".into()),
+        };
+        let out = s.list_filtered("u", &q, LIST_LIMIT).await.unwrap();
+        assert_eq!(
+            out.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["c"]
+        );
     }
 
     #[tokio::test]
@@ -1327,11 +1650,20 @@ mod tests {
 
         // Page 1 (limit 2), newest-first.
         let p1 = s.search("u", "widget", None, 2).await.unwrap();
-        assert_eq!(p1.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        assert_eq!(
+            p1.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b"]
+        );
         // Page 2 continues strictly after the cursor.
-        let cur = Cursor { saved_at: p1[1].saved_at, id: p1[1].id.clone() };
+        let cur = Cursor {
+            saved_at: p1[1].saved_at,
+            id: p1[1].id.clone(),
+        };
         let p2 = s.search("u", "widget", Some(&cur), 2).await.unwrap();
-        assert_eq!(p2.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(
+            p2.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
         // Case-insensitive, and matches body-only clips.
         assert_eq!(s.search("u", "WIDGETS", None, 10).await.unwrap().len(), 3);
         // Empty query returns nothing.
@@ -1342,9 +1674,18 @@ mod tests {
     async fn set_tags_is_ownership_scoped() {
         let s = InMemoryStore::new();
         s.create(&clip("a", "u", "https://x", 1)).await.unwrap();
-        assert!(!s.set_tags("a", "intruder", Some("rust".into())).await.unwrap());
-        assert!(s.set_tags("a", "u", crate::model::normalize_tags("Rust, Web")).await.unwrap());
-        assert_eq!(s.get("a").await.unwrap().unwrap().tags.as_deref(), Some("rust,web"));
+        assert!(!s
+            .set_tags("a", "intruder", Some("rust".into()))
+            .await
+            .unwrap());
+        assert!(s
+            .set_tags("a", "u", crate::model::normalize_tags("Rust, Web"))
+            .await
+            .unwrap());
+        assert_eq!(
+            s.get("a").await.unwrap().unwrap().tags.as_deref(),
+            Some("rust,web")
+        );
         assert!(s.set_tags("a", "u", None).await.unwrap());
         assert!(s.get("a").await.unwrap().unwrap().tags.is_none());
     }
@@ -1363,39 +1704,88 @@ mod tests {
     #[tokio::test]
     async fn highlights_list_per_clip_and_owner_scoped() {
         let s = InMemoryStore::new();
-        s.add_highlight(&highlight("h1", "c1", "u", "alpha", 10)).await.unwrap();
-        s.add_highlight(&highlight("h2", "c1", "u", "beta", 20)).await.unwrap();
-        s.add_highlight(&highlight("h3", "c2", "u", "gamma", 30)).await.unwrap();
-        s.add_highlight(&highlight("h4", "c1", "other", "delta", 40)).await.unwrap();
+        s.add_highlight(&highlight("h1", "c1", "u", "alpha", 10))
+            .await
+            .unwrap();
+        s.add_highlight(&highlight("h2", "c1", "u", "beta", 20))
+            .await
+            .unwrap();
+        s.add_highlight(&highlight("h3", "c2", "u", "gamma", 30))
+            .await
+            .unwrap();
+        s.add_highlight(&highlight("h4", "c1", "other", "delta", 40))
+            .await
+            .unwrap();
 
         // Per-clip margin: oldest-first, owner-scoped, other clips/owners excluded.
         let c1 = s.list_highlights("u", "c1").await.unwrap();
-        assert_eq!(c1.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["h1", "h2"]);
+        assert_eq!(
+            c1.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["h1", "h2"]
+        );
 
         // Aggregate: all owner's highlights newest-first.
         let all = s.list_all_highlights("u").await.unwrap();
-        assert_eq!(all.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["h3", "h2", "h1"]);
+        assert_eq!(
+            all.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["h3", "h2", "h1"]
+        );
         // Owner scoping: the other owner sees only their own.
         let other = s.list_all_highlights("other").await.unwrap();
-        assert_eq!(other.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["h4"]);
+        assert_eq!(
+            other.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["h4"]
+        );
     }
 
     #[tokio::test]
     async fn highlight_dedup_and_note_edit_are_ownership_scoped() {
         let s = InMemoryStore::new();
         // id-level idempotency: the same id is not inserted twice.
-        assert!(s.add_highlight(&highlight("h1", "c1", "u", "alpha", 10)).await.unwrap());
-        assert!(!s.add_highlight(&highlight("h1", "c1", "u", "beta", 20)).await.unwrap());
+        assert!(s
+            .add_highlight(&highlight("h1", "c1", "u", "alpha", 10))
+            .await
+            .unwrap());
+        assert!(!s
+            .add_highlight(&highlight("h1", "c1", "u", "beta", 20))
+            .await
+            .unwrap());
 
         // De-dup lookup for the same (owner, clip, quote).
-        assert!(s.find_highlight_by_quote("u", "c1", "alpha").await.unwrap().is_some());
-        assert!(s.find_highlight_by_quote("u", "c1", "nope").await.unwrap().is_none());
-        assert!(s.find_highlight_by_quote("other", "c1", "alpha").await.unwrap().is_none());
+        assert!(s
+            .find_highlight_by_quote("u", "c1", "alpha")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(s
+            .find_highlight_by_quote("u", "c1", "nope")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(s
+            .find_highlight_by_quote("other", "c1", "alpha")
+            .await
+            .unwrap()
+            .is_none());
 
         // Note edit is owner-scoped.
-        assert!(!s.set_highlight_note("h1", "intruder", Some("x".into())).await.unwrap());
-        assert!(s.set_highlight_note("h1", "u", Some("my note".into())).await.unwrap());
-        assert_eq!(s.get_highlight("h1").await.unwrap().unwrap().note.as_deref(), Some("my note"));
+        assert!(!s
+            .set_highlight_note("h1", "intruder", Some("x".into()))
+            .await
+            .unwrap());
+        assert!(s
+            .set_highlight_note("h1", "u", Some("my note".into()))
+            .await
+            .unwrap());
+        assert_eq!(
+            s.get_highlight("h1")
+                .await
+                .unwrap()
+                .unwrap()
+                .note
+                .as_deref(),
+            Some("my note")
+        );
         assert!(s.set_highlight_note("h1", "u", None).await.unwrap());
         assert!(s.get_highlight("h1").await.unwrap().unwrap().note.is_none());
 
@@ -1403,6 +1793,50 @@ mod tests {
         assert!(!s.delete_highlight("h1", "intruder").await.unwrap());
         assert!(s.delete_highlight("h1", "u").await.unwrap());
         assert!(s.get_highlight("h1").await.unwrap().is_none());
+    }
+
+    fn saved_view(id: &str, owner: &str, name: &str, query: &str, at: i64) -> SavedView {
+        SavedView {
+            id: id.into(),
+            owner_sub: owner.into(),
+            name: name.into(),
+            query: query.into(),
+            created_at: at,
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_views_crud_is_owner_scoped_and_ordered() {
+        let s = InMemoryStore::new();
+        assert!(s
+            .create_saved_view(&saved_view("v2", "u", "Later", "tag=rust", 20))
+            .await
+            .unwrap());
+        assert!(s
+            .create_saved_view(&saved_view("v1", "u", "Unread", "view=unread", 10))
+            .await
+            .unwrap());
+        assert!(!s
+            .create_saved_view(&saved_view("v1", "u", "Dup", "site=x", 30))
+            .await
+            .unwrap());
+        assert!(s
+            .create_saved_view(&saved_view("v3", "other", "Other", "tag=rust", 30))
+            .await
+            .unwrap());
+
+        let mine = s.list_saved_views("u").await.unwrap();
+        assert_eq!(
+            mine.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            vec!["v1", "v2"]
+        );
+        assert_eq!(
+            s.get_saved_view("v2").await.unwrap().unwrap().query,
+            "tag=rust"
+        );
+        assert!(!s.delete_saved_view("v2", "other").await.unwrap());
+        assert!(s.delete_saved_view("v2", "u").await.unwrap());
+        assert!(s.get_saved_view("v2").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1428,7 +1862,10 @@ mod tests {
         assert!(s.set_favorite("b", "u", true).await.unwrap());
         assert!(s.set_archived("b", "u", true).await.unwrap());
         let favs = s.list("u", Filter::Favorites).await.unwrap();
-        assert_eq!(favs.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!(
+            favs.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["b"]
+        );
         // Progress persists and is read back verbatim (clamping happens in the handler).
         assert!(s.set_progress("a", "u", 42).await.unwrap());
         assert_eq!(s.get("a").await.unwrap().unwrap().progress, 42);
@@ -1443,10 +1880,15 @@ mod tests {
         s.create(&clip("a", "u", "https://a", 10)).await.unwrap();
         s.create(&clip("b", "u", "https://b", 20)).await.unwrap();
         s.set_archived("b", "u", true).await.unwrap();
-        s.create(&clip("c", "other", "https://c", 30)).await.unwrap();
+        s.create(&clip("c", "other", "https://c", 30))
+            .await
+            .unwrap();
         let mine = s.export_clips("u", 100).await.unwrap();
         // Archived + active both included, newest-first; the other owner is excluded.
-        assert_eq!(mine.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        assert_eq!(
+            mine.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
     }
 
     #[tokio::test]

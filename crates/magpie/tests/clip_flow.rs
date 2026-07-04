@@ -11,10 +11,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Request, StatusCode};
+use magpie::config::Config;
 use magpie::fetch::{FetchError, Fetched, Fetcher};
 use magpie::store::InMemoryStore;
 use magpie::{app, AppState};
-use magpie::config::Config;
 use tower::ServiceExt;
 
 /// A deterministic fetcher: maps a URL to canned `(content_type, body)`; unknown http(s) URLs
@@ -26,8 +26,10 @@ struct StubFetcher {
 
 impl StubFetcher {
     fn with(mut self, url: &str, content_type: &str, body: &str) -> Self {
-        self.pages
-            .insert(url.to_string(), (content_type.to_string(), body.to_string()));
+        self.pages.insert(
+            url.to_string(),
+            (content_type.to_string(), body.to_string()),
+        );
         self
     }
 }
@@ -102,7 +104,9 @@ fn enc(s: &str) -> String {
     let mut out = String::new();
     for b in s.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -113,7 +117,9 @@ async fn send(app: &axum::Router, req: Request<Body>) -> Resp {
     let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let headers = res.headers().clone();
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     Resp {
         status,
         headers,
@@ -124,12 +130,19 @@ async fn send(app: &axum::Router, req: Request<Body>) -> Resp {
 fn get(path: &str, subject: Option<&str>) -> Request<Body> {
     let mut b = Request::builder().method("GET").uri(path);
     if let Some(s) = subject {
-        b = b.header("x-auth-subject", s).header("x-auth-email", format!("{s}@w33d.xyz"));
+        b = b
+            .header("x-auth-subject", s)
+            .header("x-auth-email", format!("{s}@w33d.xyz"));
     }
     b.body(Body::empty()).unwrap()
 }
 
-fn post_form(path: &str, fields: &[(&str, &str)], cookie: &str, subject: Option<&str>) -> Request<Body> {
+fn post_form(
+    path: &str,
+    fields: &[(&str, &str)],
+    cookie: &str,
+    subject: Option<&str>,
+) -> Request<Body> {
     let body = fields
         .iter()
         .map(|(k, v)| format!("{}={}", k, enc(v)))
@@ -141,7 +154,9 @@ fn post_form(path: &str, fields: &[(&str, &str)], cookie: &str, subject: Option<
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .header(header::COOKIE, format!("__Host-csrf={cookie}"));
     if let Some(s) = subject {
-        b = b.header("x-auth-subject", s).header("x-auth-email", format!("{s}@w33d.xyz"));
+        b = b
+            .header("x-auth-subject", s)
+            .header("x-auth-email", format!("{s}@w33d.xyz"));
     }
     b.body(Body::from(body)).unwrap()
 }
@@ -151,7 +166,11 @@ fn post_form(path: &str, fields: &[(&str, &str)], cookie: &str, subject: Option<
 #[tokio::test]
 async fn save_list_read_archive_delete_lifecycle() {
     let url = "https://example.com/article";
-    let app = app(state_with(StubFetcher::default().with(url, "text/html; charset=utf-8", ARTICLE)));
+    let app = app(state_with(StubFetcher::default().with(
+        url,
+        "text/html; charset=utf-8",
+        ARTICLE,
+    )));
 
     // GET / mints a CSRF cookie and shows the empty-state + bookmarklet.
     let home = send(&app, get("/", Some("alice"))).await;
@@ -165,7 +184,12 @@ async fn save_list_read_archive_delete_lifecycle() {
     // POST /clip saves it -> 302 /.
     let saved = send(
         &app,
-        post_form("/clip", &[("csrf_token", &csrf), ("url", url)], &csrf, Some("alice")),
+        post_form(
+            "/clip",
+            &[("csrf_token", &csrf), ("url", url)],
+            &csrf,
+            Some("alice"),
+        ),
     )
     .await;
     assert_eq!(saved.status, StatusCode::FOUND);
@@ -207,7 +231,12 @@ async fn save_list_read_archive_delete_lifecycle() {
     let csrf2 = after_read.csrf_cookie().unwrap();
     let arch = send(
         &app,
-        post_form(&format!("/archive/{id}"), &[("csrf_token", &csrf2), ("filter", "all")], &csrf2, Some("alice")),
+        post_form(
+            &format!("/archive/{id}"),
+            &[("csrf_token", &csrf2), ("filter", "all")],
+            &csrf2,
+            Some("alice"),
+        ),
     )
     .await;
     assert_eq!(arch.status, StatusCode::FOUND);
@@ -220,7 +249,12 @@ async fn save_list_read_archive_delete_lifecycle() {
     let csrf3 = archived.csrf_cookie().unwrap();
     let del = send(
         &app,
-        post_form(&format!("/delete/{id}"), &[("csrf_token", &csrf3), ("filter", "archived")], &csrf3, Some("alice")),
+        post_form(
+            &format!("/delete/{id}"),
+            &[("csrf_token", &csrf3), ("filter", "archived")],
+            &csrf3,
+            Some("alice"),
+        ),
     )
     .await;
     assert_eq!(del.status, StatusCode::FOUND);
@@ -233,10 +267,23 @@ async fn title_xss_is_escaped() {
     let url = "https://evil.test/x";
     let page = r#"<html><head><meta property="og:title" content="Pwn<script>alert(1)</script>"></head>
         <body><article><p>body text</p></article></body></html>"#;
-    let app = app(state_with(StubFetcher::default().with(url, "text/html", page)));
+    let app = app(state_with(StubFetcher::default().with(
+        url,
+        "text/html",
+        page,
+    )));
     let home = send(&app, get("/", Some("alice"))).await;
     let csrf = home.csrf_cookie().unwrap();
-    send(&app, post_form("/clip", &[("csrf_token", &csrf), ("url", url)], &csrf, Some("alice"))).await;
+    send(
+        &app,
+        post_form(
+            "/clip",
+            &[("csrf_token", &csrf), ("url", url)],
+            &csrf,
+            Some("alice"),
+        ),
+    )
+    .await;
 
     let list = send(&app, get("/", Some("alice"))).await;
     assert!(list.body.contains("Pwn&lt;script&gt;"));
@@ -246,29 +293,106 @@ async fn title_xss_is_escaped() {
 #[tokio::test]
 async fn duplicate_url_is_not_saved_twice() {
     let url = "https://example.com/article";
-    let app = app(state_with(StubFetcher::default().with(url, "text/html", ARTICLE)));
+    let app = app(state_with(StubFetcher::default().with(
+        url,
+        "text/html",
+        ARTICLE,
+    )));
     let home = send(&app, get("/", Some("alice"))).await;
     let csrf = home.csrf_cookie().unwrap();
 
     for _ in 0..3 {
-        let r = send(&app, post_form("/clip", &[("csrf_token", &csrf), ("url", url)], &csrf, Some("alice"))).await;
+        let r = send(
+            &app,
+            post_form(
+                "/clip",
+                &[("csrf_token", &csrf), ("url", url)],
+                &csrf,
+                Some("alice"),
+            ),
+        )
+        .await;
         assert_eq!(r.status, StatusCode::FOUND);
     }
     let list = send(&app, get("/", Some("alice"))).await;
-    assert_eq!(list.body.matches("Real Article Title").count(), 1, "only one clip despite re-saving");
+    assert_eq!(
+        list.body.matches("Real Article Title").count(),
+        1,
+        "only one clip despite re-saving"
+    );
 }
 
 #[tokio::test]
 async fn csrf_is_required_on_clip() {
     let url = "https://example.com/article";
-    let app = app(state_with(StubFetcher::default().with(url, "text/html", ARTICLE)));
+    let app = app(state_with(StubFetcher::default().with(
+        url,
+        "text/html",
+        ARTICLE,
+    )));
     // Wrong token vs cookie -> rejected before any fetch.
     let bad = send(
         &app,
-        post_form("/clip", &[("csrf_token", "wrong"), ("url", url)], "the-cookie", Some("alice")),
+        post_form(
+            "/clip",
+            &[("csrf_token", "wrong"), ("url", url)],
+            "the-cookie",
+            Some("alice"),
+        ),
     )
     .await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn saved_view_limit_redirects_with_feedback() {
+    let app = app(state_with(StubFetcher::default()));
+    let home = send(&app, get("/", Some("alice"))).await;
+    let csrf = home.csrf_cookie().unwrap();
+
+    for i in 0..30 {
+        let name = format!("View {i}");
+        let r = send(
+            &app,
+            post_form(
+                "/views",
+                &[
+                    ("csrf_token", &csrf),
+                    ("name", &name),
+                    ("view", "unread"),
+                    ("tag", ""),
+                    ("site", ""),
+                ],
+                &csrf,
+                Some("alice"),
+            ),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::FOUND);
+        assert_eq!(r.location(), "/?view=unread");
+    }
+
+    let overflow = send(
+        &app,
+        post_form(
+            "/views",
+            &[
+                ("csrf_token", &csrf),
+                ("name", "Overflow"),
+                ("view", "unread"),
+                ("tag", ""),
+                ("site", ""),
+            ],
+            &csrf,
+            Some("alice"),
+        ),
+    )
+    .await;
+    assert_eq!(overflow.status, StatusCode::FOUND);
+    assert_eq!(overflow.location(), "/?view=unread&view_error=limit");
+    let feedback = send(&app, get(&overflow.location(), Some("alice"))).await;
+    assert!(feedback.body.contains("Saved view limit reached"));
+    assert!(!feedback.body.contains("Overflow"));
 }
 
 #[tokio::test]
@@ -278,7 +402,11 @@ async fn bookmarklet_landing_rejects_bad_scheme() {
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
 
     // A valid URL renders the auto-submitting confirm page.
-    let ok = send(&app, get("/clip?u=https%3A%2F%2Fexample.com%2Fa", Some("alice"))).await;
+    let ok = send(
+        &app,
+        get("/clip?u=https%3A%2F%2Fexample.com%2Fa", Some("alice")),
+    )
+    .await;
     assert_eq!(ok.status, StatusCode::OK);
     assert!(ok.body.contains("Save this page?"));
     assert!(ok.body.contains("https://example.com/a"));
@@ -292,7 +420,12 @@ async fn unfetchable_url_returns_bad_gateway() {
     let csrf = home.csrf_cookie().unwrap();
     let r = send(
         &app,
-        post_form("/clip", &[("csrf_token", &csrf), ("url", "https://nope.test/x")], &csrf, Some("alice")),
+        post_form(
+            "/clip",
+            &[("csrf_token", &csrf), ("url", "https://nope.test/x")],
+            &csrf,
+            Some("alice"),
+        ),
     )
     .await;
     assert_eq!(r.status, StatusCode::BAD_GATEWAY);
@@ -301,7 +434,11 @@ async fn unfetchable_url_returns_bad_gateway() {
 #[tokio::test]
 async fn tags_on_save_filter_search_and_edit() {
     let url = "https://example.com/article";
-    let app = app(state_with(StubFetcher::default().with(url, "text/html", ARTICLE)));
+    let app = app(state_with(StubFetcher::default().with(
+        url,
+        "text/html",
+        ARTICLE,
+    )));
 
     // Save WITH tags on the create form.
     let home = send(&app, get("/", Some("alice"))).await;
@@ -310,7 +447,11 @@ async fn tags_on_save_filter_search_and_edit() {
         &app,
         post_form(
             "/clip",
-            &[("csrf_token", &csrf), ("url", url), ("tags", "Rust, Reading")],
+            &[
+                ("csrf_token", &csrf),
+                ("url", url),
+                ("tags", "Rust, Reading"),
+            ],
             &csrf,
             Some("alice"),
         ),
@@ -326,11 +467,77 @@ async fn tags_on_save_filter_search_and_edit() {
     // The tag view returns the clip; a non-matching tag returns the empty state.
     let tagged = send(&app, get("/?tag=rust", Some("alice"))).await;
     assert!(tagged.body.contains("Real Article Title"));
+    let combined = send(&app, get("/?tag=rust&site=Example%20News", Some("alice"))).await;
+    assert!(combined.body.contains("Real Article Title"));
+    assert!(combined.body.contains("name=\"tag\" value=\"rust\""));
+    assert!(combined
+        .body
+        .contains("name=\"site\" value=\"Example News\""));
     let empty_tag = send(&app, get("/?tag=nope", Some("alice"))).await;
     assert!(empty_tag.body.contains("No clips tagged"));
+    let empty_site = send(&app, get("/?site=Nope", Some("alice"))).await;
+    assert!(empty_site.body.contains("No clips from"));
     // whole-token: "rus" must not match the "rust" tag.
     let partial = send(&app, get("/?tag=rus", Some("alice"))).await;
     assert!(partial.body.contains("No clips tagged"));
+
+    // Save the active combination as a named view. The form posts structured fields, not a raw
+    // query string, and the redirect lands on the canonical filter URL.
+    let csrf_view = combined.csrf_cookie().unwrap();
+    let saved_view = send(
+        &app,
+        post_form(
+            "/views",
+            &[
+                ("csrf_token", &csrf_view),
+                ("name", "Rust News"),
+                ("view", "all"),
+                ("tag", "rust"),
+                ("site", "Example News"),
+            ],
+            &csrf_view,
+            Some("alice"),
+        ),
+    )
+    .await;
+    assert_eq!(saved_view.status, StatusCode::FOUND);
+    assert_eq!(saved_view.location(), "/?tag=rust&site=Example%20News");
+    let with_pin = send(&app, get("/", Some("alice"))).await;
+    assert!(with_pin.body.contains("Rust News"));
+    assert!(with_pin
+        .body
+        .contains("href=\"/?tag=rust&amp;site=Example%20News\""));
+    assert!(!with_pin.body.contains("name=\"query\""));
+
+    // Deleting the saved view is CSRF checked and owner-scoped at the store layer.
+    let view_id = {
+        let marker = "/views/";
+        let i = with_pin.body.find(marker).expect("saved view delete form") + marker.len();
+        let rest = &with_pin.body[i..];
+        rest[..rest.find('/').unwrap()].to_string()
+    };
+    let csrf_del_view = with_pin.csrf_cookie().unwrap();
+    let deleted_view = send(
+        &app,
+        post_form(
+            &format!("/views/{view_id}/delete"),
+            &[("csrf_token", &csrf_del_view)],
+            &csrf_del_view,
+            Some("alice"),
+        ),
+    )
+    .await;
+    assert_eq!(deleted_view.status, StatusCode::FOUND);
+    assert_eq!(deleted_view.location(), "/");
+    let after_delete_view = send(&app, get("/", Some("alice"))).await;
+    assert!(!after_delete_view.body.contains("Rust News"));
+
+    // Sources facet aggregates the saved site and links back into the structured site filter.
+    let sites = send(&app, get("/sites", Some("alice"))).await;
+    assert_eq!(sites.status, StatusCode::OK);
+    assert!(sites.body.contains("Example News"));
+    assert!(sites.body.contains("href=\"/?site=Example%20News\""));
+    assert!(sites.body.contains("source-row__count badge\">1"));
 
     // Full-text search over the extracted body text finds it (case-insensitive).
     let found = send(&app, get("/search?q=READABLE", Some("alice"))).await;
@@ -386,16 +593,32 @@ async fn tags_on_save_filter_search_and_edit() {
     .await;
     assert_eq!(bob_edit.status, StatusCode::FORBIDDEN);
     // And alice's tags are unchanged.
-    assert!(send(&app, get("/?tag=gardening", Some("alice"))).await.body.contains("Real Article Title"));
+    assert!(send(&app, get("/?tag=gardening", Some("alice")))
+        .await
+        .body
+        .contains("Real Article Title"));
 }
 
 #[tokio::test]
 async fn clips_are_private_to_owner() {
     let url = "https://example.com/article";
-    let app = app(state_with(StubFetcher::default().with(url, "text/html", ARTICLE)));
+    let app = app(state_with(StubFetcher::default().with(
+        url,
+        "text/html",
+        ARTICLE,
+    )));
     let home = send(&app, get("/", Some("alice"))).await;
     let csrf = home.csrf_cookie().unwrap();
-    send(&app, post_form("/clip", &[("csrf_token", &csrf), ("url", url)], &csrf, Some("alice"))).await;
+    send(
+        &app,
+        post_form(
+            "/clip",
+            &[("csrf_token", &csrf), ("url", url)],
+            &csrf,
+            Some("alice"),
+        ),
+    )
+    .await;
     let list = send(&app, get("/", Some("alice"))).await;
     let id = {
         let i = list.body.find("/r/").unwrap() + 3;

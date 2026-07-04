@@ -67,6 +67,73 @@ pub struct Highlight {
     pub created_at: i64,
 }
 
+/// Structured reading-list query: the base status view plus optional tag/source filters.
+///
+/// This deliberately stays narrower than a search DSL. The HTTP layer accepts `view`, `tag`, and
+/// `site`; both stores consume the same normalized shape so the in-memory predicate and Pg SQL stay
+/// equivalent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipQuery {
+    pub filter: Filter,
+    pub tag: Option<String>,
+    pub site: Option<String>,
+}
+
+impl ClipQuery {
+    /// Build a normalized query from request/form parameters. Unknown views fall back to `All`; tag
+    /// is normalized to one lowercase token; site is trim-only and matched case-insensitively.
+    pub fn from_params(view_token: &str, tag: &str, site: &str) -> ClipQuery {
+        ClipQuery {
+            filter: Filter::parse(view_token.trim()),
+            tag: normalize_tag_param(tag),
+            site: normalize_site_param(site),
+        }
+    }
+
+    /// Whether a clip belongs in this structured query.
+    pub fn matches(&self, clip: &Clip) -> bool {
+        self.filter.matches(clip)
+            && self
+                .tag
+                .as_deref()
+                .map_or(true, |tag| tags_contain(&clip.tags, tag))
+            && self
+                .site
+                .as_deref()
+                .map_or(true, |site| clip.site.eq_ignore_ascii_case(site))
+    }
+
+    /// The empty/default reading list: active, unarchived clips with no additional filters.
+    pub fn is_default(&self) -> bool {
+        self.filter == Filter::All && self.tag.is_none() && self.site.is_none()
+    }
+
+    /// Canonical query string using only the index page's structured keys.
+    pub fn to_query_string(&self) -> String {
+        let mut parts = Vec::new();
+        if self.filter != Filter::All {
+            parts.push(format!("view={}", url_encode(self.filter.as_str())));
+        }
+        if let Some(tag) = &self.tag {
+            parts.push(format!("tag={}", url_encode(tag)));
+        }
+        if let Some(site) = &self.site {
+            parts.push(format!("site={}", url_encode(site)));
+        }
+        parts.join("&")
+    }
+}
+
+/// A named, owner-scoped pin to a canonical [`ClipQuery`] string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedView {
+    pub id: String,
+    pub owner_sub: String,
+    pub name: String,
+    pub query: String,
+    pub created_at: i64,
+}
+
 /// Reading-list view. `All` and `Unread` show only NON-archived clips; `Favorites` shows every
 /// starred clip; `Archived` shows the archive. Keeping this a closed enum means both stores agree
 /// on what each view contains. The canonical query key is `?view=`; the legacy `?filter=` alias
@@ -170,6 +237,21 @@ pub fn normalize_tags(raw: &str) -> Option<String> {
     Some(joined)
 }
 
+/// Normalize `?tag=` to the same token vocabulary as stored tags, but keep only one token.
+fn normalize_tag_param(raw: &str) -> Option<String> {
+    normalize_tags(raw).and_then(|tags| tags.split(',').next().map(str::to_string))
+}
+
+/// Normalize `?site=`: empty strings disappear; non-empty labels keep owner-visible casing.
+fn normalize_site_param(raw: &str) -> Option<String> {
+    let site = raw.trim();
+    if site.is_empty() {
+        None
+    } else {
+        Some(site.to_string())
+    }
+}
+
 /// Max distinct tags kept per clip.
 pub const MAX_TAGS: usize = 24;
 /// Max characters of the stored tags string.
@@ -186,6 +268,20 @@ pub fn tags_contain(tags: &Option<String>, tag: &str) -> bool {
         Some(s) => s.split(',').any(|t| t.trim().eq_ignore_ascii_case(&needle)),
         None => false,
     }
+}
+
+/// Minimal percent-encoding for a query-string value (RFC 3986 unreserved kept verbatim).
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// A keyset-pagination cursor over the newest-first `(saved_at DESC, id DESC)` ordering: the last
@@ -241,7 +337,12 @@ mod tests {
 
     #[test]
     fn filter_parse_round_trips() {
-        for f in [Filter::All, Filter::Unread, Filter::Favorites, Filter::Archived] {
+        for f in [
+            Filter::All,
+            Filter::Unread,
+            Filter::Favorites,
+            Filter::Archived,
+        ] {
             assert_eq!(Filter::parse(f.as_str()), f);
         }
         // Legacy aliases still resolve.
@@ -294,7 +395,10 @@ mod tests {
 
     #[test]
     fn normalize_tags_lowercases_dedups_and_trims() {
-        assert_eq!(normalize_tags("Rust, web ,rust,,  ").as_deref(), Some("rust,web"));
+        assert_eq!(
+            normalize_tags("Rust, web ,rust,,  ").as_deref(),
+            Some("rust,web")
+        );
         assert_eq!(normalize_tags("  ").as_deref(), None);
         assert_eq!(normalize_tags(""), None);
         assert_eq!(normalize_tags("A,B,C").as_deref(), Some("a,b,c"));
@@ -312,8 +416,36 @@ mod tests {
     }
 
     #[test]
+    fn clip_query_matches_and_round_trips_canonically() {
+        let mut c = clip(false, false);
+        c.tags = normalize_tags("Rust, Web");
+        c.site = "Example News".into();
+
+        let q = ClipQuery::from_params("unread", " Rust,ignored ", "example news");
+        assert_eq!(q.filter, Filter::Unread);
+        assert_eq!(q.tag.as_deref(), Some("rust"));
+        assert_eq!(q.site.as_deref(), Some("example news"));
+        assert!(q.matches(&c));
+        assert_eq!(
+            q.to_query_string(),
+            "view=unread&tag=rust&site=example%20news"
+        );
+
+        let default = ClipQuery::from_params("", "", "");
+        assert!(default.is_default());
+        assert_eq!(default.to_query_string(), "");
+
+        let tagged = ClipQuery::from_params("", "rust", "");
+        assert!(tagged.matches(&c));
+        assert_eq!(tagged.to_query_string(), "tag=rust");
+    }
+
+    #[test]
     fn cursor_round_trips() {
-        let c = Cursor { saved_at: 1_700_000_000, id: "abc123XY".into() };
+        let c = Cursor {
+            saved_at: 1_700_000_000,
+            id: "abc123XY".into(),
+        };
         assert_eq!(Cursor::parse(&c.encode()), Some(c));
         assert_eq!(Cursor::parse("bogus"), None);
         assert_eq!(Cursor::parse("123_"), None);

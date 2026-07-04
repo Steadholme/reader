@@ -22,6 +22,9 @@ pub const EXPORT_LIMIT: usize = 10_000;
 /// Hard cap on how many clip ids a single bulk action will touch (bounds a pathological POST).
 pub const MAX_BULK_IDS: usize = 500;
 
+/// Max number of saved filtered views an owner may pin.
+pub const MAX_SAVED_VIEWS: usize = 30;
+
 /// Default page size for the keyset-paginated search results.
 pub const DEFAULT_PAGE: usize = 25;
 
@@ -52,6 +55,9 @@ pub const MAX_URL_CHARS: usize = 4000;
 
 /// Hard cap on a stored title, in characters.
 pub const MAX_TITLE_CHARS: usize = 300;
+
+/// Hard cap on a saved filtered-view name, in characters.
+pub const MAX_VIEW_NAME_CHARS: usize = 60;
 
 /// Overall per-request fetch timeout (connect + read), seconds.
 pub const FETCH_TIMEOUT_SECS: u64 = 12;

@@ -8,6 +8,8 @@
 //! excerpt, content, URL — is REMOTE/untrusted and is HTML-escaped on render, so a clipped page
 //! can never execute as HTML.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -16,15 +18,17 @@ use serde::Deserialize;
 
 use crate::auth::{self, Identity};
 use crate::config::{
-    DEFAULT_PAGE, EXPORT_LIMIT, MAX_BULK_IDS, MAX_NOTE_CHARS, MAX_PAGE, MAX_QUOTE_CHARS,
-    MAX_TAGS_INPUT_CHARS, MAX_TITLE_CHARS, MAX_URL_CHARS,
+    DEFAULT_PAGE, EXPORT_LIMIT, LIST_LIMIT, MAX_BULK_IDS, MAX_NOTE_CHARS, MAX_PAGE,
+    MAX_QUOTE_CHARS, MAX_SAVED_VIEWS, MAX_TAGS_INPUT_CHARS, MAX_TITLE_CHARS, MAX_URL_CHARS,
+    MAX_VIEW_NAME_CHARS,
 };
 use crate::error::AppError;
 use crate::extract;
 use crate::fetch::parse_http_url;
 use crate::handlers::{bookmarklet_href, esc, fmt_ts, md_escape, userbox, APP_CSS, SHIELD_SVG};
 use crate::model::{
-    clamp_progress, normalize_tags, reading_minutes, word_count, Clip, Cursor, Filter, Highlight,
+    clamp_progress, normalize_tags, reading_minutes, word_count, Clip, ClipQuery, Cursor, Filter,
+    Highlight, SavedView,
 };
 use crate::{now_secs, random_alnum, AppState};
 
@@ -35,11 +39,15 @@ const CLIP_ID_LEN: usize = 8;
 /// Length of the short random highlight id (same alphabet/collision handling as the clip id).
 const HIGHLIGHT_ID_LEN: usize = 12;
 
+/// Length of the short random saved-view id.
+const VIEW_ID_LEN: usize = 8;
+
 const INDEX_HTML: &str = include_str!("../../templates/index.html");
 const SAVE_HTML: &str = include_str!("../../templates/save.html");
 const READER_HTML: &str = include_str!("../../templates/reader.html");
 const SEARCH_HTML: &str = include_str!("../../templates/search.html");
 const HIGHLIGHTS_HTML: &str = include_str!("../../templates/highlights.html");
+const SITES_HTML: &str = include_str!("../../templates/sites.html");
 
 // ---------------------------------------------------------------------------
 // GET / — reading list
@@ -56,6 +64,12 @@ pub struct IndexQuery {
     /// Optional tag filter: `/?tag=rust` shows the owner's non-archived clips carrying that tag.
     #[serde(default)]
     pub tag: String,
+    /// Optional site/source filter, case-insensitive exact match.
+    #[serde(default)]
+    pub site: String,
+    /// One-shot status marker used after failed saved-view actions.
+    #[serde(default)]
+    pub view_error: String,
 }
 
 impl IndexQuery {
@@ -79,25 +93,17 @@ pub async fn index(
     let who = auth::identity(&headers);
     let csrf = auth::new_csrf_token();
 
-    // `?tag=` is a distinct view over the active list; otherwise the all/unread/favorites/archive
-    // view.
-    let tag = q.tag.trim();
-    let (filter, tag_view, clips) = if !tag.is_empty() {
-        let clips = state
-            .store
-            .list_by_tag(&who.subject, tag)
-            .await
-            .unwrap_or_default();
-        (Filter::All, Some(tag.to_string()), clips)
-    } else {
-        let filter = Filter::parse(q.view_token());
-        let clips = state
-            .store
-            .list(&who.subject, filter)
-            .await
-            .unwrap_or_default();
-        (filter, None, clips)
-    };
+    let clip_query = ClipQuery::from_params(q.view_token(), &q.tag, &q.site);
+    let clips = state
+        .store
+        .list_filtered(&who.subject, &clip_query, LIST_LIMIT)
+        .await
+        .unwrap_or_default();
+    let views = state
+        .store
+        .list_saved_views(&who.subject)
+        .await
+        .unwrap_or_default();
 
     let auto_archive = state
         .store
@@ -109,8 +115,9 @@ pub async fn index(
         &state,
         &who,
         &csrf,
-        filter,
-        tag_view.as_deref(),
+        &clip_query,
+        &views,
+        q.view_error.trim(),
         &clips,
         auto_archive,
     );
@@ -226,10 +233,14 @@ pub async fn clip_create(
     let who = auth::identity(&headers);
     let url = form.url.trim().to_string();
     if url.is_empty() {
-        return Err(AppError::BadRequest("Enter a web address to save.".to_string()));
+        return Err(AppError::BadRequest(
+            "Enter a web address to save.".to_string(),
+        ));
     }
     if url.chars().count() > MAX_URL_CHARS {
-        return Err(AppError::BadRequest("That web address is too long.".to_string()));
+        return Err(AppError::BadRequest(
+            "That web address is too long.".to_string(),
+        ));
     }
     // Owner-supplied tags: bound the raw input, then normalize (lowercase / trim / dedupe / cap).
     let tags_raw: String = form.tags.chars().take(MAX_TAGS_INPUT_CHARS).collect();
@@ -241,18 +252,16 @@ pub async fn clip_create(
     // Extract readable PLAIN TEXT. HTML pages go through the readability heuristic; text/plain is
     // taken as-is; anything else is refused (we only save readable web pages).
     let ct = fetched.content_type.as_str();
-    let extracted = if ct.is_empty()
-        || ct.starts_with("text/html")
-        || ct.starts_with("application/xhtml")
-    {
-        extract::extract(&fetched.body, &fetched.final_url)
-    } else if ct.starts_with("text/") {
-        extract::extract_plaintext(&fetched.body, &fetched.final_url)
-    } else {
-        return Err(AppError::BadGateway(format!(
-            "Magpie only saves readable web pages (this link is {ct})."
-        )));
-    };
+    let extracted =
+        if ct.is_empty() || ct.starts_with("text/html") || ct.starts_with("application/xhtml") {
+            extract::extract(&fetched.body, &fetched.final_url)
+        } else if ct.starts_with("text/") {
+            extract::extract_plaintext(&fetched.body, &fetched.final_url)
+        } else {
+            return Err(AppError::BadGateway(format!(
+                "Magpie only saves readable web pages (this link is {ct})."
+            )));
+        };
 
     let now = now_secs();
 
@@ -310,7 +319,12 @@ pub async fn clip_create(
         ));
     }
 
-    tracing::info!(id = clip.id, owner = who.subject, url = clip.url, "clip saved");
+    tracing::info!(
+        id = clip.id,
+        owner = who.subject,
+        url = clip.url,
+        "clip saved"
+    );
     Ok(redirect_found("/"))
 }
 
@@ -329,7 +343,11 @@ pub async fn reader(
 
     let mut clip = match state.store.get(&id).await? {
         Some(c) if c.owner_sub == who.subject => c,
-        _ => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+        _ => {
+            return Err(AppError::NotFound(
+                "No clip exists at that link.".to_string(),
+            ))
+        }
     };
 
     // Marking read is the intended side effect of opening the reader (idempotent).
@@ -337,7 +355,13 @@ pub async fn reader(
     clip.read = true;
 
     // Optional per-owner preference: opening the reader auto-archives the clip (default off).
-    if !clip.archived && state.store.get_auto_archive(&who.subject).await.unwrap_or(false) {
+    if !clip.archived
+        && state
+            .store
+            .get_auto_archive(&who.subject)
+            .await
+            .unwrap_or(false)
+    {
         let _ = state.store.set_archived(&id, &who.subject, true).await?;
         clip.archived = true;
         tracing::info!(id, owner = who.subject, "clip auto-archived on read");
@@ -404,14 +428,23 @@ pub async fn archive(
                 "You can only manage your own clips.".to_string(),
             ))
         }
-        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No clip exists at that link.".to_string(),
+            ))
+        }
     };
 
     state
         .store
         .set_archived(&id, &who.subject, !clip.archived)
         .await?;
-    tracing::info!(id, owner = who.subject, archived = !clip.archived, "clip archive toggled");
+    tracing::info!(
+        id,
+        owner = who.subject,
+        archived = !clip.archived,
+        "clip archive toggled"
+    );
     Ok(redirect_found(&back_to(form.view_token())))
 }
 
@@ -441,14 +474,23 @@ pub async fn favorite(
                 "You can only manage your own clips.".to_string(),
             ))
         }
-        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No clip exists at that link.".to_string(),
+            ))
+        }
     };
 
     state
         .store
         .set_favorite(&id, &who.subject, !clip.favorite)
         .await?;
-    tracing::info!(id, owner = who.subject, favorite = !clip.favorite, "clip favorite toggled");
+    tracing::info!(
+        id,
+        owner = who.subject,
+        favorite = !clip.favorite,
+        "clip favorite toggled"
+    );
     Ok(redirect_found(&back_to(form.view_token())))
 }
 
@@ -481,11 +523,20 @@ pub async fn api_archive(
                 "You can only manage your own clips.".to_string(),
             ))
         }
-        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No clip exists at that link.".to_string(),
+            ))
+        }
     };
     let now = !clip.archived;
     state.store.set_archived(&id, &who.subject, now).await?;
-    tracing::info!(id, owner = who.subject, archived = now, "clip archive toggled (json)");
+    tracing::info!(
+        id,
+        owner = who.subject,
+        archived = now,
+        "clip archive toggled (json)"
+    );
     Ok(axum::Json(serde_json::json!({ "ok": true, "id": id, "archived": now })).into_response())
 }
 
@@ -510,11 +561,20 @@ pub async fn api_favorite(
                 "You can only manage your own clips.".to_string(),
             ))
         }
-        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No clip exists at that link.".to_string(),
+            ))
+        }
     };
     let now = !clip.favorite;
     state.store.set_favorite(&id, &who.subject, now).await?;
-    tracing::info!(id, owner = who.subject, favorite = now, "clip favorite toggled (json)");
+    tracing::info!(
+        id,
+        owner = who.subject,
+        favorite = now,
+        "clip favorite toggled (json)"
+    );
     Ok(axum::Json(serde_json::json!({ "ok": true, "id": id, "favorite": now })).into_response())
 }
 
@@ -545,7 +605,9 @@ pub async fn delete(
         Some(_) => Err(AppError::Forbidden(
             "You can only delete your own clips.".to_string(),
         )),
-        None => Err(AppError::NotFound("No clip exists at that link.".to_string())),
+        None => Err(AppError::NotFound(
+            "No clip exists at that link.".to_string(),
+        )),
     }
 }
 
@@ -584,7 +646,11 @@ pub async fn edit_tags(
                 "You can only manage your own clips.".to_string(),
             ))
         }
-        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No clip exists at that link.".to_string(),
+            ))
+        }
     }
 
     let tags_raw: String = form.tags.chars().take(MAX_TAGS_INPUT_CHARS).collect();
@@ -636,7 +702,11 @@ pub async fn add_highlight(
                 "You can only highlight your own clips.".to_string(),
             ))
         }
-        None => return Err(AppError::NotFound("No clip exists at that link.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No clip exists at that link.".to_string(),
+            ))
+        }
     }
 
     let quote = clamp_chars(form.quote.trim(), MAX_QUOTE_CHARS);
@@ -657,7 +727,12 @@ pub async fn add_highlight(
             .store
             .set_highlight_note(&existing.id, &who.subject, note)
             .await?;
-        tracing::info!(id = existing.id, owner = who.subject, clip = clip_id, "highlight note updated");
+        tracing::info!(
+            id = existing.id,
+            owner = who.subject,
+            clip = clip_id,
+            "highlight note updated"
+        );
         return Ok(redirect_found(&format!("/r/{clip_id}")));
     }
 
@@ -682,7 +757,12 @@ pub async fn add_highlight(
             "could not allocate a unique highlight id".to_string(),
         ));
     }
-    tracing::info!(id = highlight.id, owner = who.subject, clip = clip_id, "highlight added");
+    tracing::info!(
+        id = highlight.id,
+        owner = who.subject,
+        clip = clip_id,
+        "highlight added"
+    );
     Ok(redirect_found(&format!("/r/{clip_id}")))
 }
 
@@ -761,6 +841,138 @@ pub async fn highlights(State(state): State<AppState>, headers: HeaderMap) -> Re
 }
 
 // ---------------------------------------------------------------------------
+// POST /views — save/delete filtered views
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SaveViewForm {
+    #[serde(default)]
+    pub csrf_token: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub view: String,
+    #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
+    pub site: String,
+}
+
+/// `POST /views` — CSRF-checked, owner-scoped creation of a named filtered view. The query is
+/// rebuilt from structured fields and canonicalized before storage.
+pub async fn save_view(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<SaveViewForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let query = ClipQuery::from_params(&form.view, &form.tag, &form.site);
+    let canonical = query.to_query_string();
+    if query.is_default() {
+        return Err(AppError::BadRequest(
+            "Choose a filter before saving a view.".to_string(),
+        ));
+    }
+
+    let name = clamp_chars(form.name.trim(), MAX_VIEW_NAME_CHARS);
+    if name.is_empty() {
+        return Err(AppError::BadRequest(
+            "Name this view before saving.".to_string(),
+        ));
+    }
+
+    let views = state.store.list_saved_views(&who.subject).await?;
+    if views.len() >= MAX_SAVED_VIEWS {
+        return Ok(redirect_found(&view_limit_location(&canonical)));
+    }
+
+    let mut view = SavedView {
+        id: String::new(),
+        owner_sub: who.subject.clone(),
+        name,
+        query: canonical.clone(),
+        created_at: now_secs(),
+    };
+    let mut created = false;
+    for _ in 0..6 {
+        view.id = random_alnum(VIEW_ID_LEN);
+        if state.store.create_saved_view(&view).await? {
+            created = true;
+            break;
+        }
+    }
+    if !created {
+        return Err(AppError::Internal(
+            "could not allocate a unique saved view id".to_string(),
+        ));
+    }
+    tracing::info!(id = view.id, owner = who.subject, "saved view created");
+    Ok(redirect_found(&index_location(&canonical)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteViewForm {
+    #[serde(default)]
+    pub csrf_token: String,
+}
+
+/// `POST /views/{id}/delete` — CSRF-checked, owner-scoped delete of a saved filtered view.
+pub async fn delete_view(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<DeleteViewForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    if state.store.delete_saved_view(&id, &who.subject).await? {
+        tracing::info!(id, owner = who.subject, "saved view deleted");
+    }
+    Ok(redirect_found("/"))
+}
+
+// ---------------------------------------------------------------------------
+// GET /sites — source facet
+// ---------------------------------------------------------------------------
+
+/// `GET /sites` — aggregate the owner's saved clips by source/site and link each source into the
+/// structured `?site=` filter.
+pub async fn sites(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let who = auth::identity(&headers);
+    let csrf = auth::new_csrf_token();
+    let clips = state
+        .store
+        .export_clips(&who.subject, EXPORT_LIMIT)
+        .await
+        .unwrap_or_default();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for clip in clips {
+        let site = clip.site.trim();
+        if site.is_empty() {
+            continue;
+        }
+        *counts.entry(site.to_string()).or_insert(0) += 1;
+    }
+    let mut items: Vec<(String, usize)> = counts.into_iter().collect();
+    items.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let html = render_sites(&who, &items);
+    html_with_csrf(StatusCode::OK, html, &csrf)
+}
+
+// ---------------------------------------------------------------------------
 // POST /bulk — act on many selected clips at once
 // ---------------------------------------------------------------------------
 
@@ -769,7 +981,11 @@ pub async fn highlights(State(state): State<AppState>, headers: HeaderMap) -> Re
 /// which `serde_urlencoded` cannot decode into a `Vec`, so the body is parsed manually. Supported
 /// actions: `archive`, `unarchive`, `favorite`, `unfavorite`, `delete`, `tag` (replaces tags with
 /// the `tags` field). Every mutation is owner-scoped in the store, so a non-owned id is a no-op.
-pub async fn bulk(State(state): State<AppState>, headers: HeaderMap, body: String) -> Result<Response, AppError> {
+pub async fn bulk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, AppError> {
     let fields = parse_urlencoded(&body);
     let field = |key: &str| -> String {
         fields
@@ -789,7 +1005,11 @@ pub async fn bulk(State(state): State<AppState>, headers: HeaderMap, body: Strin
     let action = field("action");
     let view_token = {
         let v = field("view");
-        if v.trim().is_empty() { field("filter") } else { v }
+        if v.trim().is_empty() {
+            field("filter")
+        } else {
+            v
+        }
     };
 
     // Collect the selected ids (deduplicated, bounded).
@@ -840,7 +1060,13 @@ pub async fn bulk(State(state): State<AppState>, headers: HeaderMap, body: Strin
             changed += 1;
         }
     }
-    tracing::info!(owner = who.subject, action, selected = ids.len(), changed, "bulk action");
+    tracing::info!(
+        owner = who.subject,
+        action,
+        selected = ids.len(),
+        changed,
+        "bulk action"
+    );
     Ok(redirect_found(&back_to(&view_token)))
 }
 
@@ -886,7 +1112,12 @@ pub async fn export(
         )
     };
 
-    tracing::info!(owner = who.subject, json = as_json, clips = clips.len(), "export served");
+    tracing::info!(
+        owner = who.subject,
+        json = as_json,
+        clips = clips.len(),
+        "export served"
+    );
     Ok((
         StatusCode::OK,
         [
@@ -1135,8 +1366,17 @@ fn export_markdown(clips: &[Clip], highlights: &[Highlight]) -> String {
             out.push_str(&format!("- Site: {}\n", md_escape(&c.site)));
         }
         out.push_str(&format!("- Saved: {}\n", fmt_ts(c.saved_at)));
-        let status = if c.archived { "archived" } else if c.read { "read" } else { "unread" };
-        out.push_str(&format!("- Status: {status}{}\n", if c.favorite { " · favorite" } else { "" }));
+        let status = if c.archived {
+            "archived"
+        } else if c.read {
+            "read"
+        } else {
+            "unread"
+        };
+        out.push_str(&format!(
+            "- Status: {status}{}\n",
+            if c.favorite { " · favorite" } else { "" }
+        ));
         if let Some(t) = &c.tags {
             out.push_str(&format!("- Tags: {}\n", md_escape(t)));
         }
@@ -1180,27 +1420,36 @@ fn redirect_found(location: &str) -> Response {
         .into_response()
 }
 
+fn index_location(query: &str) -> String {
+    if query.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/?{query}")
+    }
+}
+
+fn view_limit_location(query: &str) -> String {
+    if query.is_empty() {
+        "/?view_error=limit".to_string()
+    } else {
+        format!("/?{query}&view_error=limit")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_index(
     state: &AppState,
     who: &Identity,
     csrf: &str,
-    filter: Filter,
-    tag_view: Option<&str>,
+    query: &ClipQuery,
+    views: &[SavedView],
+    view_error: &str,
     clips: &[Clip],
     auto_archive: bool,
 ) -> String {
-    // In a `?tag=` view the tabs are replaced by a "Tagged" banner with a clear-filter link.
-    let tabs = match tag_view {
-        Some(tag) => format!(
-            "<div class=\"tag-banner\">Tagged <span class=\"tag-chip tag-chip--active\">{}</span>\
-             <a class=\"tab\" href=\"/\">Clear</a></div>",
-            esc(tag),
-        ),
-        None => render_tabs(filter),
-    };
+    let tabs = render_tabs(query.filter);
     // The return-view token used by the bulk/settings forms so an action keeps the current tab.
-    let view = tag_view.map(|_| "all").unwrap_or_else(|| filter.as_str());
+    let view = query.filter.as_str();
     INDEX_HTML
         .replace("{{CSS}}", APP_CSS)
         .replace("{{SHIELD}}", SHIELD_SVG)
@@ -1210,9 +1459,13 @@ fn render_index(
             "{{BOOKMARKLET_HREF}}",
             &esc(&bookmarklet_href(&state.config.public_base_url)),
         )
+        .replace(
+            "{{VIEWS}}",
+            &render_views_bar(views, query, csrf, view_error),
+        )
         .replace("{{TABS}}", &tabs)
         .replace("{{TOOLBAR}}", &render_toolbar(csrf, view, auto_archive))
-        .replace("{{LIST}}", &render_list(clips, csrf, filter, tag_view))
+        .replace("{{LIST}}", &render_list(clips, csrf, query))
 }
 
 /// The all / unread / favorites / archive view tabs (canonical `?view=` links).
@@ -1225,7 +1478,11 @@ fn render_tabs(active: Filter) -> String {
     ]
     .iter()
     .map(|(f, label)| {
-        let cls = if *f == active { "tab tab--active" } else { "tab" };
+        let cls = if *f == active {
+            "tab tab--active"
+        } else {
+            "tab"
+        };
         format!(
             "<a class=\"{cls}\" href=\"/?view={f}\">{label}</a>",
             f = f.as_str(),
@@ -1234,6 +1491,84 @@ fn render_tabs(active: Filter) -> String {
     })
     .collect::<Vec<_>>()
     .join("")
+}
+
+fn render_views_bar(
+    views: &[SavedView],
+    query: &ClipQuery,
+    csrf: &str,
+    view_error: &str,
+) -> String {
+    let mut out = String::new();
+
+    if view_error == "limit" {
+        out.push_str(
+            "<div class=\"saved-views__notice\" role=\"status\">Saved view limit reached. Delete a view before adding another.</div>",
+        );
+    }
+
+    if !views.is_empty() {
+        out.push_str("<div class=\"saved-views__pins\">");
+        for view in views {
+            let href = index_location(&view.query);
+            out.push_str(&format!(
+                "<span class=\"saved-view\"><a class=\"saved-view__link\" href=\"{href}\">{name}</a>\
+                   <form class=\"saved-view__del\" method=\"post\" action=\"/views/{id}/delete\">\
+                     <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+                     <button class=\"saved-view__remove\" type=\"submit\" aria-label=\"Delete view {name}\">×</button>\
+                   </form></span>",
+                href = esc(&href),
+                name = esc(&view.name),
+                id = esc(&view.id),
+                csrf = esc(csrf),
+            ));
+        }
+        out.push_str("</div>");
+    }
+
+    let mut chips = String::new();
+    if let Some(tag) = &query.tag {
+        let mut without = query.clone();
+        without.tag = None;
+        let href = index_location(&without.to_query_string());
+        chips.push_str(&format!(
+            "<span class=\"filter-chip filter-chip--tag\">tag: {tag}<a class=\"filter-chip__remove\" href=\"{href}\" aria-label=\"Clear tag\">×</a></span>",
+            tag = esc(tag),
+            href = esc(&href),
+        ));
+    }
+    if let Some(site) = &query.site {
+        let mut without = query.clone();
+        without.site = None;
+        let href = index_location(&without.to_query_string());
+        chips.push_str(&format!(
+            "<span class=\"filter-chip filter-chip--site\">site: {site}<a class=\"filter-chip__remove\" href=\"{href}\" aria-label=\"Clear site\">×</a></span>",
+            site = esc(site),
+            href = esc(&href),
+        ));
+    }
+    if !chips.is_empty() {
+        out.push_str(&format!("<div class=\"filter-chips\">{chips}</div>"));
+    }
+
+    if !query.is_default() {
+        out.push_str(&format!(
+            "<form class=\"save-view-form\" method=\"post\" action=\"/views\">\
+               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+               <input type=\"hidden\" name=\"view\" value=\"{view}\">\
+               <input type=\"hidden\" name=\"tag\" value=\"{tag}\">\
+               <input type=\"hidden\" name=\"site\" value=\"{site}\">\
+               <input class=\"save-view-form__name\" type=\"text\" name=\"name\" maxlength=\"60\" placeholder=\"Name this view\" autocomplete=\"off\" required>\
+               <button class=\"btn btn-ghost btn-sm\" type=\"submit\">Save view</button>\
+             </form>",
+            csrf = esc(csrf),
+            view = esc(query.filter.as_str()),
+            tag = esc(query.tag.as_deref().unwrap_or("")),
+            site = esc(query.site.as_deref().unwrap_or("")),
+        ));
+    }
+
+    out
 }
 
 /// The list toolbar: the bulk-action form (whose submit buttons act on the checkboxes rendered in
@@ -1314,15 +1649,20 @@ fn render_toolbar(csrf: &str, view: &str, auto_archive: bool) -> String {
 }
 
 /// The reading-list items (already filtered/ordered by the store).
-fn render_list(clips: &[Clip], csrf: &str, filter: Filter, tag_view: Option<&str>) -> String {
+fn render_list(clips: &[Clip], csrf: &str, query: &ClipQuery) -> String {
     if clips.is_empty() {
         let owned;
-        let msg = match tag_view {
-            Some(tag) => {
+        let msg = match (query.tag.as_deref(), query.site.as_deref()) {
+            (Some(tag), None) => {
                 owned = format!("No clips tagged \u{201c}{tag}\u{201d}.");
                 owned.as_str()
             }
-            None => match filter {
+            (None, Some(site)) => {
+                owned = format!("No clips from \u{201c}{site}\u{201d}.");
+                owned.as_str()
+            }
+            (Some(_), Some(_)) => "No clips match these filters.",
+            (None, None) => match query.filter {
                 Filter::All => "Your reading list is empty. Save a link to get started.",
                 Filter::Unread => "Nothing unread — you're all caught up.",
                 Filter::Favorites => "No favorites yet. Star a clip to keep it here.",
@@ -1333,7 +1673,7 @@ fn render_list(clips: &[Clip], csrf: &str, filter: Filter, tag_view: Option<&str
     }
     clips
         .iter()
-        .map(|c| render_clip_item(c, csrf, filter, true))
+        .map(|c| render_clip_item(c, csrf, query.filter, true))
         .collect::<Vec<_>>()
         .join("")
 }
@@ -1511,7 +1851,11 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
         saved = fmt_ts(clip.saved_at),
     );
 
-    let favorite_label = if clip.favorite { "Unfavorite" } else { "Favorite" };
+    let favorite_label = if clip.favorite {
+        "Unfavorite"
+    } else {
+        "Favorite"
+    };
     let favorite_form = format!(
         "<form class=\"inline-form\" method=\"post\" action=\"/favorite/{id}\">\
            <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
@@ -1521,7 +1865,11 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
         csrf = esc(csrf),
         label = favorite_label,
     );
-    let archive_label = if clip.archived { "Unarchive" } else { "Archive" };
+    let archive_label = if clip.archived {
+        "Unarchive"
+    } else {
+        "Archive"
+    };
     let archive_form = format!(
         "<form class=\"inline-form\" method=\"post\" action=\"/archive/{id}\">\
            <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
@@ -1554,7 +1902,10 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
         .replace("{{DELETE}}", &delete_form)
         .replace("{{TAGS}}", &render_tags_editor(clip, csrf))
         .replace("{{CONTENT}}", &render_content(&clip.content_text))
-        .replace("{{HIGHLIGHTS}}", &render_highlights_margin(clip, csrf, highlights))
+        .replace(
+            "{{HIGHLIGHTS}}",
+            &render_highlights_margin(clip, csrf, highlights),
+        )
         .replace("{{PROGRESS}}", &render_reader_progress(clip, csrf))
 }
 
@@ -1728,6 +2079,33 @@ async fn render_highlights_page(
         .replace("{{CSS}}", APP_CSS)
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("Highlights", Some(&who.email)))
+        .replace("{{BODY}}", &body)
+}
+
+fn render_sites(who: &Identity, sites: &[(String, usize)]) -> String {
+    let body = if sites.is_empty() {
+        "<ul class=\"source-list\"><li class=\"source-row source-row--empty\">No sources yet.</li></ul>"
+            .to_string()
+    } else {
+        let rows = sites
+            .iter()
+            .map(|(site, count)| {
+                format!(
+                    "<li class=\"source-row\"><a class=\"source-row__link\" href=\"/?site={href}\">{site}</a><span class=\"source-row__count badge\">{count}</span></li>",
+                    href = url_encode(site),
+                    site = esc(site),
+                    count = count,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!("<ul class=\"source-list\">{rows}</ul>")
+    };
+
+    SITES_HTML
+        .replace("{{CSS}}", APP_CSS)
+        .replace("{{SHIELD}}", SHIELD_SVG)
+        .replace("{{USERBOX}}", &userbox("Sources", Some(&who.email)))
         .replace("{{BODY}}", &body)
 }
 
