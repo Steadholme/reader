@@ -261,3 +261,29 @@
   .save-view-form__name { flex: 1 1 auto; }
   .saved-view__link { max-width: 130px; }
 }
+
+/* ---- Responsive reinforcement (tablet/phone). Desktop rules above unchanged. ---- */
+@media (max-width: 900px) {
+  /* App-bar-style head rows pair a title with a back/action button; let them wrap
+     instead of crushing the title on tablet widths. */
+  .console__head--row { flex-wrap: wrap; align-items: flex-start; }
+
+  /* The tab pill grows once Highlights/Sources are appended and can exceed a tablet's
+     width — make it a horizontal scroll strip rather than overflowing the page. */
+  .magpie-tabs { max-width: 100%; overflow-x: auto; }
+  .magpie-tabs--row { justify-content: flex-start; }
+  .magpie-tabs__group { flex: none; }
+  .magpie-tab { flex: none; white-space: nowrap; }
+}
+
+@media (max-width: 640px) {
+  /* Stack the two halves of the list toolbar so neither the bulk tools nor the
+     right-side controls get squeezed on a phone. */
+  .listbar { flex-direction: column; align-items: stretch; }
+  .listbar__right { justify-content: flex-start; }
+  .bulkbar { justify-content: flex-start; }
+  .bulk-tags { flex: 1 1 auto; min-width: 0; }
+
+  /* Slightly tighter tabs so more fit before the strip needs to scroll. */
+  .magpie-tab { padding: 6px 12px; }
+}
