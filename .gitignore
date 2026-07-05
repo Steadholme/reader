@@ -1,2 +1,5 @@
 target/
 crates/*/target/
+
+# Agent scratch
+.workflow/

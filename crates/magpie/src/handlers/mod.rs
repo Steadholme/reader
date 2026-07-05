@@ -13,9 +13,24 @@ pub mod health;
 
 use axum::http::StatusCode;
 use axum::response::Html;
+use std::sync::OnceLock;
+
+/// Magpie-only CSS layered after Odyssey's canonical font, tokens, and components.
+pub const SERVICE_CSS: &str = include_str!("../../static/service.css");
+
+static APP_CSS: OnceLock<String> = OnceLock::new();
 
 /// Embedded design system, inlined into each rendered page's `<style>`.
-pub const APP_CSS: &str = include_str!("../../static/app.css");
+pub fn app_css() -> &'static str {
+    APP_CSS
+        .get_or_init(|| {
+            let mut css = String::with_capacity(odyssey::APP_CSS.len() + SERVICE_CSS.len());
+            css.push_str(odyssey::APP_CSS);
+            css.push_str(SERVICE_CSS);
+            css
+        })
+        .as_str()
+}
 
 /// The Clips app icon (Lucide "bookmark") shown in the app-bar brand tile.
 pub const SHIELD_SVG: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>"##;
@@ -102,7 +117,11 @@ pub fn userbox(title: &str, email: Option<&str>) -> String {
 fn identity_bits(email: &str) -> (String, String, String) {
     let e = email.trim();
     if e.is_empty() {
-        return ("H".to_string(), "Account".to_string(), "Signed in".to_string());
+        return (
+            "H".to_string(),
+            "Account".to_string(),
+            "Signed in".to_string(),
+        );
     }
     let local = e.split('@').next().unwrap_or(e);
     let initials = local
@@ -135,7 +154,7 @@ pub fn render_error(
     email: Option<&str>,
 ) -> (StatusCode, Html<String>) {
     let body = ERROR_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("Magpie", email))
         .replace("{{STATUS}}", &status.as_u16().to_string())
@@ -197,9 +216,15 @@ mod tests {
     #[test]
     fn md_escape_neutralizes_html_and_markdown() {
         // Raw HTML angle brackets become entities (inert in any downstream renderer).
-        assert_eq!(md_escape("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;/script&gt;");
+        assert_eq!(
+            md_escape("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
         // Markdown structural metacharacters are backslash-escaped.
-        assert_eq!(md_escape("a*b_c`d[e]#f|g\\h"), "a\\*b\\_c\\`d\\[e\\]\\#f\\|g\\\\h");
+        assert_eq!(
+            md_escape("a*b_c`d[e]#f|g\\h"),
+            "a\\*b\\_c\\`d\\[e\\]\\#f\\|g\\\\h"
+        );
         // Newlines collapse to spaces so a field can't break the surrounding structure.
         assert_eq!(md_escape("line1\r\nline2"), "line1 line2");
     }

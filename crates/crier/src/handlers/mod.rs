@@ -13,9 +13,24 @@ pub mod health;
 pub mod web;
 
 use axum::http::StatusCode;
+use std::sync::OnceLock;
+
+/// Crier-only CSS layered after Odyssey's canonical font, tokens, and components.
+pub const SERVICE_CSS: &str = include_str!("../../static/service.css");
+
+static APP_CSS: OnceLock<String> = OnceLock::new();
 
 /// Embedded design system, inlined into each rendered page's `<style>`.
-pub const APP_CSS: &str = include_str!("../../static/app.css");
+pub fn app_css() -> &'static str {
+    APP_CSS
+        .get_or_init(|| {
+            let mut css = String::with_capacity(odyssey::APP_CSS.len() + SERVICE_CSS.len());
+            css.push_str(odyssey::APP_CSS);
+            css.push_str(SERVICE_CSS);
+            css
+        })
+        .as_str()
+}
 
 /// Cross-subdomain gateway logout (Crier lives at social.w33d.xyz; the IdP is at id.w33d.xyz).
 pub const LOGOUT_URL: &str = "https://sso.w33d.xyz/_gw/auth/logout";
@@ -207,7 +222,11 @@ pub fn topbar(page_title: &str, email: &str) -> String {
         logout = LOGOUT_URL,
     );
     // Append the shared toast host + progressive-enhancement script (inert where it finds nothing).
-    format!("{header}{enhance}", header = header, enhance = TOPBAR_ENHANCE)
+    format!(
+        "{header}{enhance}",
+        header = header,
+        enhance = TOPBAR_ENHANCE
+    )
 }
 
 /// Derive the avatar initials, the primary display name, and a secondary menu line from a
@@ -290,7 +309,7 @@ pub fn error_page(status: StatusCode, message: &str) -> String {
   </div>
 </main>
 </body></html>"#,
-        css = APP_CSS,
+        css = app_css(),
         topbar = topbar("Crier", "—"),
         code = code,
         reason = esc(reason),

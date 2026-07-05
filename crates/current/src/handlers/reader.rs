@@ -17,7 +17,7 @@ use crate::auth;
 use crate::config::READER_SHORT_CONTENT_CHARS;
 use crate::error::AppError;
 use crate::feed::safe_link;
-use crate::handlers::{esc, fmt_rel, fmt_ts, userbox, APP_CSS, SHIELD_SVG};
+use crate::handlers::{app_css, esc, fmt_rel, fmt_ts, userbox, SHIELD_SVG};
 use crate::model::RiverEntry;
 use crate::{now_secs, AppState};
 
@@ -52,7 +52,11 @@ pub async fn read(
     let who = auth::identity(&headers);
     let entry = match state.store.get_item_owned(&id, &who.subject).await? {
         Some(e) => e,
-        None => return Err(AppError::NotFound("No such item in your feeds.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No such item in your feeds.".to_string(),
+            ))
+        }
     };
 
     let (paragraphs, source) = resolve_content(&state, &who.subject, &entry).await;
@@ -120,9 +124,15 @@ async fn resolve_content(
             } else {
                 let cache = article::paragraphs_to_cache(&paras);
                 let write = if full_content {
-                    state.store.set_entry_content(&item.id, owner_sub, &cache).await
+                    state
+                        .store
+                        .set_entry_content(&item.id, owner_sub, &cache)
+                        .await
                 } else {
-                    state.store.set_item_full_text(&item.id, owner_sub, &cache).await
+                    state
+                        .store
+                        .set_item_full_text(&item.id, owner_sub, &cache)
+                        .await
                 };
                 if let Err(e) = write {
                     tracing::warn!(item = item.id, error = %e, "reader: cache write failed");
@@ -189,7 +199,7 @@ fn render_reader(
     };
 
     READER_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("river", Some(email)))
         .replace("{{FEED}}", &esc(&entry.feed_title))

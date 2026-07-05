@@ -934,6 +934,7 @@ dependencies = [
  "async-trait",
  "axum",
  "hmac",
+ "odyssey",
  "rand 0.8.6",
  "reqwest",
  "scraper",
@@ -1041,6 +1042,10 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "odyssey"
+version = "0.1.0"
 
 [[package]]
 name = "once_cell"

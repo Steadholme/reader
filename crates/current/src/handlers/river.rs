@@ -16,7 +16,7 @@ use crate::config::{RIVER_LIMIT, SUMMARY_SENTENCES};
 use crate::error::AppError;
 use crate::feed::safe_link;
 use crate::handlers::{
-    esc, fmt_rel, fmt_ts, html_with_csrf, redirect_found, redirect_see_other, userbox, APP_CSS,
+    app_css, esc, fmt_rel, fmt_ts, html_with_csrf, redirect_found, redirect_see_other, userbox,
     SHIELD_SVG,
 };
 use crate::model::RiverEntry;
@@ -101,7 +101,11 @@ pub async fn star(
     // Toggle relative to the current stored state (owner-scoped read, then owner-scoped write).
     let now_starred = match state.store.get_item_owned(&id, &who.subject).await? {
         Some(entry) => !entry.item.starred,
-        None => return Err(AppError::NotFound("No such item in your feeds.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No such item in your feeds.".to_string(),
+            ))
+        }
     };
     state
         .store
@@ -167,7 +171,11 @@ pub async fn open(
     let who = auth::identity(&headers);
     let entry = match state.store.get_item_owned(&id, &who.subject).await? {
         Some(e) => e,
-        None => return Err(AppError::NotFound("No such item in your feeds.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No such item in your feeds.".to_string(),
+            ))
+        }
     };
     // Marking read is the whole point of "opening" — do it before we leave.
     state.store.mark_item_read(&id, &who.subject).await?;
@@ -194,7 +202,11 @@ pub async fn item_summary(
     let who = auth::identity(&headers);
     let entry = match state.store.get_item_owned(&id, &who.subject).await? {
         Some(e) => e,
-        None => return Err(AppError::NotFound("No such item in your feeds.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No such item in your feeds.".to_string(),
+            ))
+        }
     };
     let sentences =
         nlp::extractive_sentences(&entry.item.title, &entry.item.summary, SUMMARY_SENTENCES);
@@ -245,8 +257,16 @@ pub async fn api_mark_read(
     let updated = state.store.mark_item_read(&id, &who.subject).await?;
     // `updated == false` means either the item was already read OR it is not in the owner's feeds.
     // Distinguish the latter (a 404) so the client can reconcile; an already-read item is a no-op.
-    if !updated && state.store.get_item_owned(&id, &who.subject).await?.is_none() {
-        return Err(AppError::NotFound("No such item in your feeds.".to_string()));
+    if !updated
+        && state
+            .store
+            .get_item_owned(&id, &who.subject)
+            .await?
+            .is_none()
+    {
+        return Err(AppError::NotFound(
+            "No such item in your feeds.".to_string(),
+        ));
     }
     let unread = unread_total(&state, &who.subject).await;
     Ok(Json(serde_json::json!({ "ok": true, "id": id, "unread": unread })).into_response())
@@ -268,7 +288,11 @@ pub async fn api_star(
     let who = auth::identity(&headers);
     let now_starred = match state.store.get_item_owned(&id, &who.subject).await? {
         Some(entry) => !entry.item.starred,
-        None => return Err(AppError::NotFound("No such item in your feeds.".to_string())),
+        None => {
+            return Err(AppError::NotFound(
+                "No such item in your feeds.".to_string(),
+            ))
+        }
     };
     state
         .store
@@ -353,7 +377,7 @@ fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64, filte
     };
 
     RIVER_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("river", Some(email)))
         .replace("{{UNREAD}}", &esc(&count_label))
@@ -425,7 +449,11 @@ fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str, filter: &s
     } else {
         format!("<p class=\"entry__summary\">{}</p>", esc(&item.summary))
     };
-    let star_label = if item.starred { "★ Unstar" } else { "☆ Star" };
+    let star_label = if item.starred {
+        "★ Unstar"
+    } else {
+        "☆ Star"
+    };
 
     format!(
         "<article class=\"entry\" data-entry tabindex=\"-1\">\
@@ -488,7 +516,11 @@ fn render_tldr(item: &crate::model::Item) -> String {
 fn render_also(cluster: &Cluster) -> String {
     let extra = cluster.extra_feed_count();
     // Distinct other feeds, else fall back to the raw other-source count.
-    let n = if extra > 0 { extra } else { cluster.others.len() };
+    let n = if extra > 0 {
+        extra
+    } else {
+        cluster.others.len()
+    };
     let noun = if n == 1 { "feed" } else { "feeds" };
     let sources = cluster
         .others

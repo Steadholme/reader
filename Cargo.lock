@@ -265,6 +265,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hmac",
+ "odyssey",
  "rand_core 0.6.4",
  "reqwest",
  "rsa",
@@ -334,6 +335,7 @@ dependencies = [
  "async-trait",
  "axum",
  "hmac",
+ "odyssey",
  "quick-xml",
  "rand 0.8.6",
  "reqwest",
@@ -1013,6 +1015,7 @@ dependencies = [
  "async-trait",
  "axum",
  "hmac",
+ "odyssey",
  "rand 0.8.6",
  "reqwest",
  "scraper",
@@ -1156,6 +1159,10 @@ dependencies = [
  "autocfg",
  "libm",
 ]
+
+[[package]]
+name = "odyssey"
+version = "0.1.0"
 
 [[package]]
 name = "once_cell"

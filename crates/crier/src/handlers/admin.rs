@@ -21,14 +21,17 @@ use serde::Deserialize;
 use crate::audit::AuditEvent;
 use crate::auth;
 use crate::error::AppError;
-use crate::handlers::{esc, fmt_date, render_note_html, topbar, APP_CSS};
+use crate::handlers::{app_css, esc, fmt_date, render_note_html, topbar};
 use crate::store::{actor_domain, Blocked};
 use crate::{federation, now_secs, AppState};
 
 const ADMIN_HTML: &str = include_str!("../../templates/admin.html");
 
 /// `GET /admin` — the admin panel. Gated on admin group membership (`403` otherwise).
-pub async fn panel(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
+pub async fn panel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
     auth::require_admin(&headers)?;
 
     let email = auth::display_email(&headers);
@@ -58,7 +61,7 @@ pub async fn panel(State(state): State<AppState>, headers: HeaderMap) -> Result<
     };
 
     let page = ADMIN_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{TOPBAR}}", &topbar("Admin", &email))
         .replace("{{CSRF}}", &esc(&csrf))
         .replace("{{BLOCKS}}", &blocks_html)
@@ -98,7 +101,9 @@ pub async fn add_block(
         _ => ("actor", form.target.trim().to_string()),
     };
     if target.is_empty() {
-        return Err(AppError::InvalidRequest("a block target is required".to_string()));
+        return Err(AppError::InvalidRequest(
+            "a block target is required".to_string(),
+        ));
     }
 
     state
@@ -112,9 +117,12 @@ pub async fn add_block(
     tracing::info!(%target, kind, "block added");
 
     let actor = if email.is_empty() { &sub } else { &email };
-    state
-        .audit
-        .emit(AuditEvent::notice("crier.admin.block", actor, &target, kind));
+    state.audit.emit(AuditEvent::notice(
+        "crier.admin.block",
+        actor,
+        &target,
+        kind,
+    ));
 
     Ok(redirect("/admin"))
 }
@@ -140,15 +148,20 @@ pub async fn remove_block(
 
     let target = form.target.trim();
     if target.is_empty() {
-        return Err(AppError::InvalidRequest("a block target is required".to_string()));
+        return Err(AppError::InvalidRequest(
+            "a block target is required".to_string(),
+        ));
     }
     state.store.remove_block(target).await?;
     tracing::info!(%target, "block removed");
 
     let actor = if email.is_empty() { &sub } else { &email };
-    state
-        .audit
-        .emit(AuditEvent::notice("crier.admin.unblock", actor, target, "unblock"));
+    state.audit.emit(AuditEvent::notice(
+        "crier.admin.unblock",
+        actor,
+        target,
+        "unblock",
+    ));
 
     Ok(redirect("/admin"))
 }
@@ -174,7 +187,9 @@ pub async fn remove_follower(
 
     let actor_target = form.actor.trim();
     if actor_target.is_empty() {
-        return Err(AppError::InvalidRequest("a follower actor is required".to_string()));
+        return Err(AppError::InvalidRequest(
+            "a follower actor is required".to_string(),
+        ));
     }
     state.store.remove_follower(actor_target).await?;
     tracing::info!(actor = %actor_target, "follower removed by admin");
@@ -211,7 +226,9 @@ pub async fn delete_note(
 
     let id = form.id.trim();
     if id.is_empty() {
-        return Err(AppError::InvalidRequest("a note id is required".to_string()));
+        return Err(AppError::InvalidRequest(
+            "a note id is required".to_string(),
+        ));
     }
     let deleted = state.store.admin_delete_note(id).await?;
     if !deleted {
@@ -220,9 +237,12 @@ pub async fn delete_note(
     tracing::info!(%id, "note deleted by admin");
 
     let actor = if email.is_empty() { &sub } else { &email };
-    state
-        .audit
-        .emit(AuditEvent::notice("crier.admin.note.delete", actor, id, "deleted"));
+    state.audit.emit(AuditEvent::notice(
+        "crier.admin.note.delete",
+        actor,
+        id,
+        "deleted",
+    ));
 
     // Best-effort federation: announce a Delete/Tombstone to followers (spawned; never blocks).
     if state.config.federate {
@@ -230,7 +250,13 @@ pub async fn delete_note(
         let cfg = state.config.clone();
         let store = state.store.clone();
         let signer = state.signer.clone();
-        tokio::spawn(federation::deliver_delete(client, cfg, store, signer, id.to_string()));
+        tokio::spawn(federation::deliver_delete(
+            client,
+            cfg,
+            store,
+            signer,
+            id.to_string(),
+        ));
     }
 
     Ok(redirect("/admin"))
@@ -302,7 +328,10 @@ fn render_note_row(note: &crate::store::Note, csrf: &str) -> String {
 fn redirect(location: &str) -> Response {
     (
         StatusCode::SEE_OTHER,
-        [(header::LOCATION, HeaderValue::from_str(location).expect("valid location"))],
+        [(
+            header::LOCATION,
+            HeaderValue::from_str(location).expect("valid location"),
+        )],
     )
         .into_response()
 }

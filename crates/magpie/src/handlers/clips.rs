@@ -25,7 +25,7 @@ use crate::config::{
 use crate::error::AppError;
 use crate::extract;
 use crate::fetch::parse_http_url;
-use crate::handlers::{bookmarklet_href, esc, fmt_ts, md_escape, userbox, APP_CSS, SHIELD_SVG};
+use crate::handlers::{app_css, bookmarklet_href, esc, fmt_ts, md_escape, userbox, SHIELD_SVG};
 use crate::model::{
     clamp_progress, normalize_tags, reading_minutes, word_count, Clip, ClipQuery, Cursor, Filter,
     Highlight, SavedView,
@@ -193,7 +193,7 @@ pub async fn clip_form(
 
     let csrf = auth::new_csrf_token();
     let html = SAVE_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("Save", Some(&who.email)))
         .replace("{{CSRF}}", &esc(&csrf))
@@ -1451,7 +1451,7 @@ fn render_index(
     // The return-view token used by the bulk/settings forms so an action keeps the current tab.
     let view = query.filter.as_str();
     INDEX_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("Reading list", Some(&who.email)))
         .replace("{{CSRF}}", &esc(csrf))
@@ -1479,9 +1479,9 @@ fn render_tabs(active: Filter) -> String {
     .iter()
     .map(|(f, label)| {
         let cls = if *f == active {
-            "tab tab--active"
+            "magpie-tab magpie-tab--active"
         } else {
-            "tab"
+            "magpie-tab"
         };
         format!(
             "<a class=\"{cls}\" href=\"/?view={f}\">{label}</a>",
@@ -1890,7 +1890,7 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
     );
 
     READER_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("Reader", Some(&who.email)))
         .replace("{{TITLE}}", &esc(&title))
@@ -2076,7 +2076,7 @@ async fn render_highlights_page(
     };
 
     HIGHLIGHTS_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("Highlights", Some(&who.email)))
         .replace("{{BODY}}", &body)
@@ -2103,7 +2103,7 @@ fn render_sites(who: &Identity, sites: &[(String, usize)]) -> String {
     };
 
     SITES_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("Sources", Some(&who.email)))
         .replace("{{BODY}}", &body)
@@ -2175,7 +2175,7 @@ fn render_search(
     };
 
     SEARCH_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("Search", Some(&who.email)))
         .replace("{{QUERY_ATTR}}", &esc(query))

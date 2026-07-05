@@ -17,11 +17,26 @@ pub mod river;
 
 use axum::http::{header, StatusCode};
 use axum::response::{Html, Response};
+use std::sync::OnceLock;
 
 use crate::auth;
 
+/// Current-only CSS layered after Odyssey's canonical font, tokens, and components.
+pub const SERVICE_CSS: &str = include_str!("../../static/service.css");
+
+static APP_CSS: OnceLock<String> = OnceLock::new();
+
 /// Embedded design system, inlined into each rendered page's `<style>`.
-pub const APP_CSS: &str = include_str!("../../static/app.css");
+pub fn app_css() -> &'static str {
+    APP_CSS
+        .get_or_init(|| {
+            let mut css = String::with_capacity(odyssey::APP_CSS.len() + SERVICE_CSS.len());
+            css.push_str(odyssey::APP_CSS);
+            css.push_str(SERVICE_CSS);
+            css
+        })
+        .as_str()
+}
 
 /// The Feeds app icon (Lucide "rss") shown in the app-bar brand tile and the Feeds nav item.
 pub const SHIELD_SVG: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>"##;
@@ -89,7 +104,11 @@ pub fn userbox(active: &str, email: Option<&str>) -> String {
 fn identity_bits(email: &str) -> (String, String, String) {
     let e = email.trim();
     if e.is_empty() {
-        return ("H".to_string(), "Account".to_string(), "Signed in".to_string());
+        return (
+            "H".to_string(),
+            "Account".to_string(),
+            "Signed in".to_string(),
+        );
     }
     let local = e.split('@').next().unwrap_or(e);
     let initials = local
@@ -108,7 +127,7 @@ pub fn render_error(
     email: Option<&str>,
 ) -> (StatusCode, Html<String>) {
     let body = ERROR_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("", email))
         .replace("{{STATUS}}", &status.as_u16().to_string())

@@ -16,7 +16,7 @@ use crate::auth;
 use crate::config::MAX_CONTENT_CHARS;
 use crate::error::AppError;
 use crate::handlers::{
-    esc, fmt_date, render_note_html, render_note_html_tagged, time_el, topbar, APP_CSS,
+    app_css, esc, fmt_date, render_note_html, render_note_html_tagged, time_el, topbar,
 };
 use crate::hashtag::parse_hashtags;
 use crate::store::{ActorFilter, Boost, Following, HomeNote, List, Note, Notification};
@@ -101,7 +101,7 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
     };
 
     let page = TIMELINE_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{TOPBAR}}", &topbar("Crier", &email))
         .replace("{{HEADER}}", &header_html)
         .replace("{{AVATAR}}", &avatar_html)
@@ -492,7 +492,7 @@ pub async fn notifications(
   </div>
 </main>
 </body></html>"#,
-        css = APP_CSS,
+        css = app_css(),
         topbar = topbar("Notifications", &email),
         unread = unread,
         rows = rows,
@@ -629,7 +629,7 @@ pub async fn thread(
   </div>
 </main>
 </body></html>"#,
-        css = APP_CSS,
+        css = app_css(),
         topbar = topbar("Thread", &email),
         items = items,
     );
@@ -720,7 +720,7 @@ pub async fn blocks_page(
   </div></section>
 </main>
 </body></html>"#,
-        css = APP_CSS,
+        css = app_css(),
         topbar = topbar("Blocks", &email),
         csrf = esc(&csrf),
         block_rows = block_rows,
@@ -993,12 +993,19 @@ pub async fn api_boost_json(
         let store = state.store.clone();
         let signer = state.signer.clone();
         tokio::spawn(federation::deliver_announce(
-            client, cfg, store, signer, hn.id.clone(), hn.actor,
+            client,
+            cfg,
+            store,
+            signer,
+            hn.id.clone(),
+            hn.actor,
         ));
     }
 
-    Ok(axum::Json(serde_json::json!({ "ok": true, "boosted": true, "note_uri": hn.id }))
-        .into_response())
+    Ok(
+        axum::Json(serde_json::json!({ "ok": true, "boosted": true, "note_uri": hn.id }))
+            .into_response(),
+    )
 }
 
 /// `POST /api/unboost/json` — remove a boost by note uri, returning
@@ -1038,8 +1045,10 @@ pub async fn api_unboost_json(
         ));
     }
 
-    Ok(axum::Json(serde_json::json!({ "ok": true, "boosted": false, "note_uri": note_uri }))
-        .into_response())
+    Ok(
+        axum::Json(serde_json::json!({ "ok": true, "boosted": false, "note_uri": note_uri }))
+            .into_response(),
+    )
 }
 
 /// `GET /api/notifications/unread` — the authed owner's unread notification count as
@@ -1102,7 +1111,7 @@ pub async fn tag_page(
   </div>
 </main>
 </body></html>"#,
-        css = APP_CSS,
+        css = app_css(),
         topbar = topbar("Crier", &email),
         tag = esc(&tag_lc),
         items = items,
@@ -1199,7 +1208,7 @@ pub async fn lists_index(State(state): State<AppState>, headers: HeaderMap) -> R
   </div></section>
 </main>
 </body></html>"#,
-        css = APP_CSS,
+        css = app_css(),
         topbar = topbar("Lists", &email),
         csrf = esc(&csrf),
         rows = rows,
@@ -1341,7 +1350,7 @@ pub async fn list_detail(
   </div>
 </main>
 </body></html>"#,
-        css = APP_CSS,
+        css = app_css(),
         topbar = topbar("Lists", &email),
         name = esc(&list.name),
         id = esc(&id),
@@ -1464,7 +1473,7 @@ pub async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response
   </div>
 </main>
 </body></html>"#,
-        css = APP_CSS,
+        css = app_css(),
         topbar = topbar("Home", &email),
         following = following.len(),
         items = items,

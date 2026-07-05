@@ -17,6 +17,8 @@ path = "src/main.rs"
 # HTTP framework (shared with keystone/pastefire/cortex): Form/State/Path/Query extractors,
 # typed responses, server-rendered HTML.
 axum = "0.8"
+# Shared HOLDFAST design system CSS layered before Magpie's service-specific CSS.
+odyssey = { path = "../odyssey" }
 # Async runtime axum runs on. The Store + Fetcher traits are async: handlers `.await` them
 # directly and PgStore/HttpFetcher use sqlx/reqwest natively, so a worker thread is NEVER
 # blocked (no block_in_place, no sync-over-async bridge).

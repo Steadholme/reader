@@ -17,6 +17,8 @@ path = "src/main.rs"
 # HTTP framework (shared with keystone/pastefire/watchtower): Form/State/Path extractors,
 # typed responses, server-rendered HTML.
 axum = "0.8"
+# Shared HOLDFAST design system CSS layered before Current's service-specific CSS.
+odyssey = { path = "../odyssey" }
 # Async runtime axum runs on. The Store trait is async: handlers `.await` it directly, PgStore
 # uses sqlx natively, and the feed poller is a native-async Tokio task — a worker thread is
 # NEVER blocked (no block_in_place, no sync-over-async bridge).

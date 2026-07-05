@@ -17,7 +17,9 @@ use crate::auth::{self, Identity};
 use crate::config::{MAX_FEEDS_PER_OWNER, MAX_URL_CHARS};
 use crate::error::AppError;
 use crate::feed::{fetch_and_store, new_feed_id, parse_opml_urls, safe_link};
-use crate::handlers::{esc, fmt_rel, html_with_csrf, redirect_see_other, userbox, APP_CSS, SHIELD_SVG};
+use crate::handlers::{
+    app_css, esc, fmt_rel, html_with_csrf, redirect_see_other, userbox, SHIELD_SVG,
+};
 use crate::model::{Category, Feed};
 use crate::{now_secs, random_alnum, AppState, FEED_ID_LEN};
 
@@ -87,12 +89,7 @@ pub async fn add(
     // Friendly cap so the per-owner river join stays cheap.
     let existing = state.store.list_feeds(&who.subject).await?;
     if existing.len() >= MAX_FEEDS_PER_OWNER {
-        return Ok(rerender(
-            &state,
-            &who,
-            "You've reached the maximum number of feeds.",
-        )
-        .await);
+        return Ok(rerender(&state, &who, "You've reached the maximum number of feeds.").await);
     }
 
     // Shared insert + best-effort initial fetch (the same path the OPML import reuses).
@@ -154,11 +151,21 @@ pub async fn create_category(
 
     let name = form.name.trim();
     if name.is_empty() || name.chars().count() > MAX_CATEGORY_NAME_CHARS {
-        return Ok(rerender(&state, &who, "Enter a category name (up to 120 characters).").await);
+        return Ok(rerender(
+            &state,
+            &who,
+            "Enter a category name (up to 120 characters).",
+        )
+        .await);
     }
     let existing = state.store.list_categories(&who.subject).await?;
     if existing.len() >= MAX_CATEGORIES_PER_OWNER {
-        return Ok(rerender(&state, &who, "You've reached the maximum number of categories.").await);
+        return Ok(rerender(
+            &state,
+            &who,
+            "You've reached the maximum number of categories.",
+        )
+        .await);
     }
     let category = Category {
         id: random_alnum(FEED_ID_LEN),
@@ -169,7 +176,11 @@ pub async fn create_category(
     if !state.store.add_category(&category).await? {
         return Ok(rerender(&state, &who, "A category with that name already exists.").await);
     }
-    tracing::info!(owner = who.subject, category = category.id, "category created");
+    tracing::info!(
+        owner = who.subject,
+        category = category.id,
+        "category created"
+    );
     Ok(redirect_see_other("/feeds"))
 }
 
@@ -188,7 +199,12 @@ pub async fn rename_category(
     let who = auth::identity(&headers);
     let name = form.name.trim();
     if name.is_empty() || name.chars().count() > MAX_CATEGORY_NAME_CHARS {
-        return Ok(rerender(&state, &who, "Enter a category name (up to 120 characters).").await);
+        return Ok(rerender(
+            &state,
+            &who,
+            "Enter a category name (up to 120 characters).",
+        )
+        .await);
     }
     state.store.rename_category(&id, &who.subject, name).await?;
     Ok(redirect_see_other("/feeds"))
@@ -417,12 +433,7 @@ pub async fn import_opml(
 /// Insert a subscription for `owner` to an already scheme-validated `url`, then kick off the
 /// best-effort initial fetch. Returns `Ok(true)` when newly inserted, `Ok(false)` on an
 /// `(owner, url)` conflict (dedup). Shared by the single add form and the OPML import.
-async fn subscribe(
-    state: &AppState,
-    owner: &str,
-    url: String,
-    now: i64,
-) -> Result<bool, AppError> {
+async fn subscribe(state: &AppState, owner: &str, url: String, now: i64) -> Result<bool, AppError> {
     let feed = Feed {
         id: new_feed_id(),
         owner_sub: owner.to_string(),
@@ -447,7 +458,9 @@ fn render_opml(feeds: &[Feed]) -> String {
     let mut body = String::new();
     for f in feeds {
         // Only export a feed whose URL is a safe http(s) link (matches what import will accept).
-        let Some(url) = safe_link(&f.url) else { continue };
+        let Some(url) = safe_link(&f.url) else {
+            continue;
+        };
         let title = if f.title.trim().is_empty() {
             f.url.clone()
         } else {
@@ -484,9 +497,21 @@ fn spawn_initial_fetch(state: AppState, feed: Feed) {
 /// Re-render the feeds page with an inline error (a fresh CSRF token + the current list).
 async fn rerender(state: &AppState, who: &Identity, message: &str) -> Response {
     let csrf = auth::new_csrf_token();
-    let feeds = state.store.list_feeds(&who.subject).await.unwrap_or_default();
-    let categories = state.store.list_categories(&who.subject).await.unwrap_or_default();
-    let unread = state.store.feed_unread_counts(&who.subject).await.unwrap_or_default();
+    let feeds = state
+        .store
+        .list_feeds(&who.subject)
+        .await
+        .unwrap_or_default();
+    let categories = state
+        .store
+        .list_categories(&who.subject)
+        .await
+        .unwrap_or_default();
+    let unread = state
+        .store
+        .feed_unread_counts(&who.subject)
+        .await
+        .unwrap_or_default();
     let html = render_feeds(&feeds, &categories, &unread, who, &csrf, Some(message));
     html_with_csrf(StatusCode::BAD_REQUEST, html, &csrf)
 }
@@ -514,7 +539,7 @@ fn render_feeds(
     let list = render_grouped_feeds(feeds, categories, &unread_by_feed, csrf, now);
 
     FEEDS_HTML
-        .replace("{{CSS}}", APP_CSS)
+        .replace("{{CSS}}", app_css())
         .replace("{{SHIELD}}", SHIELD_SVG)
         .replace("{{USERBOX}}", &userbox("feeds", Some(&who.email)))
         .replace("{{ERROR}}", &error_block)
@@ -526,7 +551,8 @@ fn render_feeds(
 /// The category management block: a create form + one row per category (rename / move / delete).
 fn render_category_manager(categories: &[Category], csrf: &str) -> String {
     let rows = if categories.is_empty() {
-        "<li class=\"list__meta\">No categories yet. Create one to group your feeds.</li>".to_string()
+        "<li class=\"list__meta\">No categories yet. Create one to group your feeds.</li>"
+            .to_string()
     } else {
         let last = categories.len() - 1;
         categories
@@ -629,8 +655,7 @@ fn render_grouped_feeds(
         ));
     }
     // Uncategorized: no category, OR a dangling category id (its category was deleted elsewhere).
-    let known: std::collections::HashSet<&str> =
-        categories.iter().map(|c| c.id.as_str()).collect();
+    let known: std::collections::HashSet<&str> = categories.iter().map(|c| c.id.as_str()).collect();
     let uncategorized: Vec<&Feed> = feeds
         .iter()
         .filter(|f| match f.category_id.as_deref() {

@@ -22,7 +22,7 @@
       <p class="sub">Clip web pages to read later. Magpie fetches each page, pulls out the readable text, and saves it to your list.</p>
     </div>
 
-    <div class="layout">
+    <div class="magpie-layout">
       <section class="reading">
         <form class="search-bar" method="get" action="/search" role="search">
           <input class="search-input" type="search" name="q" inputmode="search" autocomplete="off"
@@ -30,10 +30,10 @@
           <button class="btn btn-secondary btn-sm" type="submit">Search</button>
         </form>
         <div class="saved-views" data-saved-views>{{VIEWS}}</div>
-        <div class="tabs tabs--row">
-          <div class="tabs__group">{{TABS}}</div>
-          <a class="tab" href="/highlights">Highlights</a>
-          <a class="tab" href="/sites">Sources</a>
+        <div class="magpie-tabs magpie-tabs--row">
+          <div class="magpie-tabs__group">{{TABS}}</div>
+          <a class="magpie-tab" href="/highlights">Highlights</a>
+          <a class="magpie-tab" href="/sites">Sources</a>
         </div>
         {{TOOLBAR}}
         <ul class="clip-list">
