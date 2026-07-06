@@ -16,10 +16,12 @@ use crate::auth;
 use crate::config::MAX_CONTENT_CHARS;
 use crate::error::AppError;
 use crate::handlers::{
-    app_css, esc, fmt_date, render_note_html, render_note_html_tagged, time_el, topbar,
+    app_css, esc, feed_tabs, fmt_date, render_note_html, render_note_html_tagged, time_el, topbar,
+    ICON_BAN, ICON_BELL, ICON_BOOST, ICON_EDIT, ICON_EXTLINK, ICON_HOME, ICON_LIST, ICON_MORE,
+    ICON_REPLY, ICON_REPLYCTX, ICON_THREAD, ICON_TRASH,
 };
 use crate::hashtag::parse_hashtags;
-use crate::store::{ActorFilter, Boost, Following, HomeNote, List, Note, Notification};
+use crate::store::{ActorFilter, Boost, Following, HomeNote, List, Note, Notification, Profile};
 use crate::{federation, now_nanos, now_secs, AppState};
 
 /// Hard cap on a list name, in characters.
@@ -55,6 +57,7 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
     let follower_count = state.store.count_followers().await;
     let profile = state.store.get_profile().await;
     let top_tags = state.store.top_tags(TOP_TAGS_LIMIT).await;
+    let owner_av = owner_avatar(&profile, &state.config);
 
     // Merge the owner's notes + their boosts into one newest-first timeline. A boost is attributed
     // as "boosted" and carries its own un-boost control.
@@ -64,7 +67,7 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
         timeline.push((
             n.created_at,
             n.id.clone(),
-            render_note(n, &csrf, owned, &state.config),
+            render_note(n, &csrf, owned, &state.config, &owner_av),
         ));
     }
     for b in &boosts {
@@ -84,18 +87,21 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
     let tags_html = render_tags_section(&top_tags);
 
     let header_html = if profile.header_url.is_empty() {
-        String::new()
+        r#"<div class="crier-hero__banner crier-hero__banner--brand"></div>"#.to_string()
     } else {
         format!(
-            r#"<div class="profile__banner"><img src="{url}" alt="Profile header"></div>"#,
+            r#"<div class="profile__banner crier-hero__banner"><img src="{url}" alt="Profile header"></div>"#,
             url = esc(&profile.header_url),
         )
     };
     let avatar_html = if profile.avatar_url.is_empty() {
-        String::new()
+        format!(
+            r#"<span class="avatar crier-hero__avatar" aria-hidden="true">{initial}</span>"#,
+            initial = esc(&initial_of(&state.config.display_name)),
+        )
     } else {
         format!(
-            r#"<img class="profile__avatar" src="{url}" alt="Profile avatar">"#,
+            r#"<img class="profile__avatar crier-hero__avatar" src="{url}" alt="Profile avatar">"#,
             url = esc(&profile.avatar_url),
         )
     };
@@ -103,6 +109,7 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
     let page = TIMELINE_HTML
         .replace("{{CSS}}", app_css())
         .replace("{{TOPBAR}}", &topbar("Crier", &email))
+        .replace("{{FEEDTABS}}", &feed_tabs("profile"))
         .replace("{{HEADER}}", &header_html)
         .replace("{{AVATAR}}", &avatar_html)
         .replace("{{HANDLE}}", &esc(&state.config.handle()))
@@ -111,6 +118,8 @@ pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Respons
         .replace("{{FOLLOWERS}}", &follower_count.to_string())
         .replace("{{NOTE_COUNT}}", &notes.len().to_string())
         .replace("{{CSRF}}", &esc(&csrf))
+        .replace("{{COMPOSE_AVATAR}}", &compose_avatar(&profile, &state.config))
+        .replace("{{FOLLOW}}", &render_follow_card(&csrf))
         .replace("{{AVATAR_URL}}", &esc(&profile.avatar_url))
         .replace("{{HEADER_URL}}", &esc(&profile.header_url))
         .replace("{{TAGS}}", &tags_html)
@@ -127,9 +136,12 @@ fn render_tags_section(top: &[(String, i64)]) -> String {
     }
     let pills = top
         .iter()
-        .map(|(tag, count)| {
+        .enumerate()
+        .map(|(i, (tag, count))| {
+            let hot = if i < 3 { " tag--hot" } else { "" };
             format!(
-                "<a class=\"tag\" href=\"/tags/{href}\">#{label} <span class=\"list__meta\">{count}</span></a>",
+                "<a class=\"tag{hot}\" href=\"/tags/{href}\">#{label} <span class=\"list__meta\">{count}</span></a>",
+                hot = hot,
                 href = esc(tag),
                 label = esc(tag),
                 count = count,
@@ -137,7 +149,7 @@ fn render_tags_section(top: &[(String, i64)]) -> String {
         })
         .collect::<String>();
     format!(
-        "<section class=\"card\"><div class=\"card__body\">\
+        "<section class=\"card crier-trend\"><div class=\"card__body\">\
            <h2>Tags</h2>\
            <div class=\"tagcloud\">{pills}</div>\
          </div></section>",
@@ -148,21 +160,32 @@ fn render_tags_section(top: &[(String, i64)]) -> String {
 /// One boost card in the timeline: attributed as "boosted <actor>", the (escaped) snapshot content,
 /// a link to the original, and an un-boost control.
 fn render_boost_card(boost: &Boost, csrf: &str) -> String {
+    let (name, handle, initial) = actor_display(&boost.actor);
+    let handle_html = render_handle(&handle);
     format!(
         r#"<article class="note note--boost">
-  <div class="note__meta">🔁 Boosted <a href="{url}" rel="noopener noreferrer nofollow">{actor}</a></div>
-  <div class="note__body">{body}</div>
-  <div class="note__meta">{date}</div>
-  <div class="note__actions">
-    <form method="post" action="/api/unboost">
-      <input type="hidden" name="csrf_token" value="{csrf}">
-      <input type="hidden" name="note_uri" value="{uri}">
-      <button class="btn btn-ghost btn-sm" type="submit">Un-boost</button>
-    </form>
+  <div class="note__boostline">{icon_boost}Boosted <a href="{url}" rel="noopener noreferrer nofollow">{actor}</a></div>{avatar}
+  <div class="note__main">
+    <header class="note__head">
+      <a class="note__author" href="{url}" rel="noopener noreferrer nofollow"><span class="note__name">{name}</span>{handle_html}</a>
+      <a class="note__time" href="{url}" rel="noopener noreferrer nofollow">{date}</a>
+    </header>
+    <div class="note__body">{body}</div>
+    <div class="note__actionbar">
+      <form method="post" action="/api/unboost">
+        <input type="hidden" name="csrf_token" value="{csrf}">
+        <input type="hidden" name="note_uri" value="{uri}">
+        <button class="note-act note-act--boost" type="submit" title="Un-boost">{icon_boost}<span>Un-boost</span></button>
+      </form>
+    </div>
   </div>
 </article>"#,
+        icon_boost = ICON_BOOST,
         url = esc(&boost.url),
         actor = esc(&boost.actor),
+        name = esc(&name),
+        handle_html = handle_html,
+        avatar = avatar_glyph("", &initial),
         body = render_note_html(&boost.content),
         date = time_el(boost.created_at),
         csrf = esc(csrf),
@@ -462,7 +485,10 @@ pub async fn notifications(
     state.store.mark_notifications_read(&owner).await?;
 
     let rows = if notifications.is_empty() {
-        r#"<div class="empty-state"><h2>No notifications</h2><p>Mentions, replies, boosts, and new followers will appear here.</p></div>"#.to_string()
+        format!(
+            r#"<div class="empty"><div class="empty__ico">{icon}</div><h3>No notifications</h3><p>Mentions, replies, boosts, and new followers will appear here.</p></div>"#,
+            icon = ICON_BELL,
+        )
     } else {
         notifications
             .iter()
@@ -470,33 +496,20 @@ pub async fn notifications(
             .collect::<String>()
     };
 
-    let page = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>Notifications · Crier · HOLDFAST</title><style>{css}</style></head>
-<body class="page-reading">
-{topbar}
-<main class="reader">
-  <div class="profile">
-    <h1 class="profile__name">Notifications</h1>
-    <p class="profile__summary">Mentions, replies, boosts, and new followers.</p>
-    <div class="profile__stats">
-      <span class="pill pill-accent">{unread} unread</span>
-      <span><a class="btn btn-ghost btn-sm" href="/">&larr; Your profile</a></span>
-    </div>
-  </div>
-  <div class="note-list">
-    {rows}
-  </div>
-</main>
-</body></html>"#,
-        css = app_css(),
-        topbar = topbar("Notifications", &email),
-        unread = unread,
+    let head = render_pagehead(
+        ICON_BELL,
+        "Notifications",
+        &format!(r#"<span class="pill pill-accent">{unread} unread</span>"#, unread = unread),
+    );
+    let main = format!(
+        r#"{head}
+    <div class="note-list">
+      {rows}
+    </div>"#,
+        head = head,
         rows = rows,
     );
+    let page = page_shell("Notifications", "Notifications", &email, "notifications", &main, None);
 
     let _ = csrf; // keep CSRF cookie issuance consistent with other SSO pages.
     Ok(html_with_cookie(page, set_cookie))
@@ -516,17 +529,25 @@ fn render_notification(n: &Notification, cfg: &crate::config::Config) -> String 
         r#"<span class="pill pill-info">Unread</span>"#
     };
     let link = notification_link(cfg, &n.note_uri);
+    let (name, handle, initial) = actor_display(&n.actor);
+    let handle_html = render_handle(&handle);
     format!(
-        r#"<article class="note notification{unread_cls}">
-  <div class="note__meta">{title} {unread}</div>
-  <div class="note__body"><a href="{actor}" rel="noopener noreferrer nofollow">{actor_label}</a> {detail}{link}</div>
-  <div class="note__meta">{date}</div>
+        r#"<article class="note notification{unread_cls}">{avatar}
+  <div class="note__main">
+    <header class="note__head">
+      <a class="note__author" href="{actor}" rel="noopener noreferrer nofollow"><span class="note__name">{name}</span>{handle_html}</a>{unread}
+      <span class="note__time">{date}</span>
+    </header>
+    <div class="note__body"><strong>{title}</strong> — {detail}{link}</div>
+  </div>
 </article>"#,
         unread_cls = if n.read { "" } else { " notification--unread" },
+        avatar = avatar_glyph("", &initial),
         title = esc(title),
         unread = unread,
         actor = esc(&n.actor),
-        actor_label = esc(&n.actor),
+        name = esc(&name),
+        handle_html = handle_html,
         detail = esc(detail),
         link = link,
         date = time_el(n.created_at),
@@ -580,13 +601,16 @@ pub async fn thread(
     let local_replies = state.store.list_local_replies(&note_uri).await;
     let remote_replies = state.store.list_home_replies(&note_uri).await;
 
+    let profile = state.store.get_profile().await;
+    let owner_av = owner_avatar(&profile, &state.config);
+
     let mut items = String::new();
     for n in &ancestors {
         let owned = !viewer.is_empty() && n.author_sub == viewer;
-        items.push_str(&render_note(n, &csrf, owned, &state.config));
+        items.push_str(&render_note(n, &csrf, owned, &state.config, &owner_av));
     }
     let owned = !viewer.is_empty() && note.author_sub == viewer;
-    items.push_str(&render_note(&note, &csrf, owned, &state.config));
+    items.push_str(&render_note(&note, &csrf, owned, &state.config, &owner_av));
 
     let mut replies: Vec<(i64, String, String)> = Vec::new();
     for n in &local_replies {
@@ -594,7 +618,7 @@ pub async fn thread(
         replies.push((
             n.created_at,
             n.id.clone(),
-            render_note(n, &csrf, owned, &state.config),
+            render_note(n, &csrf, owned, &state.config, &owner_av),
         ));
     }
     for n in &remote_replies {
@@ -610,29 +634,20 @@ pub async fn thread(
         items.push_str(&html);
     }
 
-    let page = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>Thread · Crier · HOLDFAST</title><style>{css}</style></head>
-<body class="page-reading">
-{topbar}
-<main class="reader">
-  <div class="profile">
-    <h1 class="profile__name">Thread</h1>
-    <p class="profile__summary">This post with its local ancestors and direct replies.</p>
-    <div class="profile__stats"><span><a class="btn btn-ghost btn-sm" href="/">&larr; Your profile</a></span></div>
-  </div>
-  <div class="note-list">
-    {items}
-  </div>
-</main>
-</body></html>"#,
-        css = app_css(),
-        topbar = topbar("Thread", &email),
+    let head = render_pagehead(
+        ICON_THREAD,
+        "Thread",
+        r#"This post with its local ancestors and direct replies. · <a href="/">&larr; Your profile</a>"#,
+    );
+    let main = format!(
+        r#"{head}
+    <div class="note-list">
+      {items}
+    </div>"#,
+        head = head,
         items = items,
     );
+    let page = page_shell("Thread", "Thread", &email, "", &main, None);
 
     Ok(html_with_cookie(page, set_cookie))
 }
@@ -680,52 +695,43 @@ pub async fn blocks_page(
             .collect::<String>()
     };
 
-    let page = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>Blocks · Crier · HOLDFAST</title><style>{css}</style></head>
-<body class="page-reading">
-{topbar}
-<main class="reader">
-  <div class="profile">
-    <h1 class="profile__name">Blocks &amp; mutes</h1>
-    <p class="profile__summary">Muted actors are hidden from Home. Blocked actors are hidden and rejected at the inbox.</p>
-    <div class="profile__stats"><span><a class="btn btn-ghost btn-sm" href="/home">&larr; Home timeline</a></span></div>
-  </div>
-  <section class="card composer"><div class="card__body">
-    <h2>Block an actor</h2>
-    <form method="post" action="/blocks/block">
-      <input type="hidden" name="csrf_token" value="{csrf}">
-      <div class="field">
-        <label for="block-actor">Remote actor URL</label>
-        <input id="block-actor" name="actor" class="composer__body" placeholder="https://mastodon.social/users/foo" required>
-      </div>
-      <div class="composer__actions"><button class="btn btn-danger" type="submit">Block</button></div>
-    </form>
-    <ul class="list">{block_rows}</ul>
-  </div></section>
-  <section class="card"><div class="card__body">
-    <h2>Mute an actor</h2>
-    <form method="post" action="/blocks/mute">
-      <input type="hidden" name="csrf_token" value="{csrf}">
-      <div class="field">
-        <label for="mute-actor">Remote actor URL</label>
-        <input id="mute-actor" name="actor" class="composer__body" placeholder="https://mastodon.social/users/foo" required>
-      </div>
-      <div class="composer__actions"><button class="btn btn-primary" type="submit">Mute</button></div>
-    </form>
-    <ul class="list">{mute_rows}</ul>
-  </div></section>
-</main>
-</body></html>"#,
-        css = app_css(),
-        topbar = topbar("Blocks", &email),
+    let head = render_pagehead(
+        ICON_BAN,
+        "Blocks &amp; mutes",
+        "Muted actors are hidden from Home. Blocked actors are hidden and rejected at the inbox.",
+    );
+    let main = format!(
+        r#"{head}
+    <section class="card"><div class="card__body">
+      <h2>Block an actor</h2>
+      <form method="post" action="/blocks/block">
+        <input type="hidden" name="csrf_token" value="{csrf}">
+        <div class="field">
+          <label for="block-actor">Remote actor URL</label>
+          <input id="block-actor" name="actor" class="input" placeholder="https://mastodon.social/users/foo" required>
+        </div>
+        <div class="composer__actions"><button class="btn btn-danger" type="submit">Block</button></div>
+      </form>
+      <ul class="list">{block_rows}</ul>
+    </div></section>
+    <section class="card"><div class="card__body">
+      <h2>Mute an actor</h2>
+      <form method="post" action="/blocks/mute">
+        <input type="hidden" name="csrf_token" value="{csrf}">
+        <div class="field">
+          <label for="mute-actor">Remote actor URL</label>
+          <input id="mute-actor" name="actor" class="input" placeholder="https://mastodon.social/users/foo" required>
+        </div>
+        <div class="composer__actions"><button class="btn btn-primary" type="submit">Mute</button></div>
+      </form>
+      <ul class="list">{mute_rows}</ul>
+    </div></section>"#,
+        head = head,
         csrf = esc(&csrf),
         block_rows = block_rows,
         mute_rows = mute_rows,
     );
+    let page = page_shell("Blocks", "Blocks", &email, "", &main, None);
 
     Ok(html_with_cookie(page, set_cookie))
 }
@@ -1079,43 +1085,39 @@ pub async fn tag_page(
 
     let tag_lc = tag.trim().to_lowercase();
     let notes = state.store.notes_with_tag(&tag_lc).await;
+    let profile = state.store.get_profile().await;
+    let owner_av = owner_avatar(&profile, &state.config);
 
     let items = if notes.is_empty() {
-        r#"<div class="empty-state"><h2>No posts with this tag</h2><p>Post a note containing this hashtag and it will appear here.</p></div>"#.to_string()
+        r#"<div class="empty"><div class="empty__ico">#</div><h3>No posts with this tag</h3><p>Post a note containing this hashtag and it will appear here.</p></div>"#.to_string()
     } else {
         notes
             .iter()
             .map(|n| {
                 let owned = !viewer.is_empty() && n.author_sub == viewer;
-                render_note(n, &csrf, owned, &state.config)
+                render_note(n, &csrf, owned, &state.config, &owner_av)
             })
             .collect::<String>()
     };
 
-    let page = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>#{tag} · Crier · HOLDFAST</title><style>{css}</style></head>
-<body class="page-reading">
-{topbar}
-<main class="reader">
-  <div class="profile">
-    <h1 class="profile__name">#{tag}</h1>
-    <p class="profile__summary">Your posts tagged #{tag}.</p>
-    <div class="profile__stats"><span><a class="btn btn-ghost btn-sm" href="/">&larr; Your profile</a></span></div>
-  </div>
-  <div class="note-list">
-    {items}
-  </div>
-</main>
-</body></html>"#,
-        css = app_css(),
-        topbar = topbar("Crier", &email),
-        tag = esc(&tag_lc),
+    let title = format!("#{}", esc(&tag_lc));
+    let head = render_pagehead(
+        "#",
+        &title,
+        &format!(
+            r#"<strong>{n}</strong> posts · <a href="/">&larr; Your profile</a>"#,
+            n = notes.len(),
+        ),
+    );
+    let main = format!(
+        r#"{head}
+    <div class="note-list">
+      {items}
+    </div>"#,
+        head = head,
         items = items,
     );
+    let page = page_shell(&title, "Crier", &email, "", &main, None);
 
     html_with_cookie(page, set_cookie)
 }
@@ -1179,40 +1181,32 @@ pub async fn lists_index(State(state): State<AppState>, headers: HeaderMap) -> R
             .collect::<String>()
     };
 
-    let page = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>Lists · Crier · HOLDFAST</title><style>{css}</style></head>
-<body class="page-reading">
-{topbar}
-<main class="reader">
-  <div class="profile">
-    <h1 class="profile__name">Lists</h1>
-    <p class="profile__summary">Group the remote actors you follow into focused timelines.</p>
-  </div>
-  <section class="card composer"><div class="card__body">
-    <form method="post" action="/lists">
-      <input type="hidden" name="csrf_token" value="{csrf}">
-      <div class="field">
-        <label for="list-name">New list</label>
-        <input id="list-name" name="name" class="composer__body" maxlength="120" placeholder="e.g. Rustaceans" required>
-      </div>
-      <div class="composer__actions"><button class="btn btn-primary" type="submit">Create list</button></div>
-    </form>
-  </div></section>
-  <section class="card"><div class="card__body">
-    <h2>Your lists</h2>
-    <ul class="list">{rows}</ul>
-  </div></section>
-</main>
-</body></html>"#,
-        css = app_css(),
-        topbar = topbar("Lists", &email),
+    let head = render_pagehead(
+        ICON_LIST,
+        "Lists",
+        "Group the remote actors you follow into focused timelines.",
+    );
+    let main = format!(
+        r#"{head}
+    <section class="card"><div class="card__body">
+      <form method="post" action="/lists">
+        <input type="hidden" name="csrf_token" value="{csrf}">
+        <div class="field">
+          <label for="list-name">New list</label>
+          <input id="list-name" name="name" class="input" maxlength="120" placeholder="e.g. Rustaceans" required>
+        </div>
+        <div class="composer__actions"><button class="btn btn-primary" type="submit">Create list</button></div>
+      </form>
+    </div></section>
+    <section class="card"><div class="card__body">
+      <h2>Your lists</h2>
+      <ul class="list">{rows}</ul>
+    </div></section>"#,
+        head = head,
         csrf = esc(&csrf),
         rows = rows,
     );
+    let page = page_shell("Lists", "Lists", &email, "", &main, None);
 
     html_with_cookie(page, set_cookie)
 }
@@ -1288,7 +1282,10 @@ pub async fn list_detail(
     let notes = state.store.list_home_notes_for_list(&id).await;
 
     let items = if notes.is_empty() {
-        r#"<div class="empty-state"><h2>Nothing here yet</h2><p>Add members below; their posts will stream into this list.</p></div>"#.to_string()
+        format!(
+            r#"<div class="empty"><div class="empty__ico">{icon}</div><h3>Nothing here yet</h3><p>Add members below; their posts will stream into this list.</p></div>"#,
+            icon = ICON_LIST,
+        )
     } else {
         notes
             .iter()
@@ -1319,45 +1316,37 @@ pub async fn list_detail(
             .collect::<String>()
     };
 
-    let page = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>{name} · Lists · Crier</title><style>{css}</style></head>
-<body class="page-reading">
-{topbar}
-<main class="reader">
-  <div class="profile">
-    <h1 class="profile__name">{name}</h1>
-    <p class="profile__summary">A focused timeline of this list's members.</p>
-    <div class="profile__stats"><span><a class="btn btn-ghost btn-sm" href="/lists">&larr; All lists</a></span></div>
-  </div>
-  <section class="card"><div class="card__body">
-    <h2>Members</h2>
-    <form method="post" action="/lists/{id}/members">
-      <input type="hidden" name="csrf_token" value="{csrf}">
-      <div class="field">
-        <label for="member-actor">Add a followed actor</label>
-        <input id="member-actor" name="actor" class="composer__body" placeholder="https://mastodon.social/users/Gargron" required>
-      </div>
-      <div class="composer__actions"><button class="btn btn-primary btn-sm" type="submit">Add member</button></div>
-    </form>
-    <ul class="list">{member_rows}</ul>
-  </div></section>
-  <div class="note-list">
-    {items}
-  </div>
-</main>
-</body></html>"#,
-        css = app_css(),
-        topbar = topbar("Lists", &email),
-        name = esc(&list.name),
-        id = esc(&id),
+    let name = esc(&list.name);
+    let id = esc(&id);
+    let head = render_pagehead(
+        ICON_LIST,
+        &name,
+        r#"A focused timeline of this list's members. · <a href="/lists">&larr; All lists</a>"#,
+    );
+    let main = format!(
+        r#"{head}
+    <section class="card"><div class="card__body">
+      <h2>Members</h2>
+      <form method="post" action="/lists/{id}/members">
+        <input type="hidden" name="csrf_token" value="{csrf}">
+        <div class="field">
+          <label for="member-actor">Add a followed actor</label>
+          <input id="member-actor" name="actor" class="input" placeholder="https://mastodon.social/users/Gargron" required>
+        </div>
+        <div class="composer__actions"><button class="btn btn-primary btn-sm" type="submit">Add member</button></div>
+      </form>
+      <ul class="list">{member_rows}</ul>
+    </div></section>
+    <div class="note-list">
+      {items}
+    </div>"#,
+        head = head,
+        id = id,
         csrf = esc(&csrf),
         member_rows = member_rows,
         items = items,
     );
+    let page = page_shell(&list.name, "Lists", &email, "", &main, None);
 
     Ok(html_with_cookie(page, set_cookie))
 }
@@ -1413,18 +1402,27 @@ fn render_home_note_plain(note: &HomeNote, cfg: &crate::config::Config) -> Strin
     } else {
         note.received_at
     };
-    let reply = render_reply_link(cfg, &note.in_reply_to);
+    let replyctx = render_reply_link(cfg, &note.in_reply_to);
+    let (name, handle, initial) = actor_display(&note.actor);
+    let handle_html = render_handle(&handle);
     format!(
-        r#"<article class="note">
-  <div class="note__meta"><a href="{url}" rel="noopener noreferrer nofollow">{actor}</a></div>
-  <div class="note__body">{body}</div>
-  <div class="note__meta">{date}{reply}</div>
+        r#"<article class="note">{avatar}
+  <div class="note__main">
+    <header class="note__head">
+      <a class="note__author" href="{actor_url}" rel="noopener noreferrer nofollow"><span class="note__name">{name}</span>{handle_html}</a>
+      <a class="note__time" href="{url}" rel="noopener noreferrer nofollow">{date}</a>
+    </header>{replyctx}
+    <div class="note__body">{body}</div>
+  </div>
 </article>"#,
+        avatar = avatar_glyph("", &initial),
+        actor_url = esc(&note.actor),
         url = esc(&note.url),
-        actor = esc(&note.actor),
+        name = esc(&name),
+        handle_html = handle_html,
         body = render_note_html(&note.content),
         date = time_el(when),
-        reply = reply,
+        replyctx = replyctx,
     )
 }
 
@@ -1444,9 +1442,10 @@ pub async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response
 
     let mut items = String::new();
     if notes.is_empty() {
-        items.push_str(
-            r#"<div class="empty-state"><h2>Your home is quiet</h2><p>Follow a remote actor from the timeline; their posts will stream in here.</p></div>"#,
-        );
+        items.push_str(&format!(
+            r#"<div class="empty"><div class="empty__ico">{icon}</div><h3>Your home is quiet</h3><p>Follow a remote actor from the timeline; their posts will stream in here.</p></div>"#,
+            icon = ICON_HOME,
+        ));
     } else {
         for n in &notes {
             let boosted = state.store.is_boosted(&n.id).await;
@@ -1454,29 +1453,29 @@ pub async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response
         }
     }
 
-    let page = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>Home · Crier · HOLDFAST</title><style>{css}</style></head>
-<body class="page-reading">
-{topbar}
-<main class="reader">
-  <div class="profile">
-    <h1 class="profile__name">Home timeline</h1>
-    <p class="profile__summary">Posts from the {following} remote actor(s) you follow.</p>
-    <div class="profile__stats"><span><a class="btn btn-ghost btn-sm" href="/">&larr; Your profile</a></span></div>
-  </div>
-  <div class="note-list">
-    {items}
-  </div>
-</main>
-</body></html>"#,
-        css = app_css(),
-        topbar = topbar("Home", &email),
-        following = following.len(),
+    let head = render_pagehead(
+        ICON_HOME,
+        "Home timeline",
+        &format!(
+            "Posts from the <strong>{}</strong> remote actor(s) you follow.",
+            following.len()
+        ),
+    );
+    let main = format!(
+        r#"{head}
+    <div class="note-list">
+      {items}
+    </div>"#,
+        head = head,
         items = items,
+    );
+    let page = page_shell(
+        "Home",
+        "Home",
+        &email,
+        "home",
+        &main,
+        Some(&render_follow_card(&csrf)),
     );
 
     html_with_cookie(page, set_cookie)
@@ -1500,39 +1499,46 @@ fn render_home_note(
     } else {
         "/api/boost"
     };
-    let label = if boosted {
-        "🔁 Un-boost"
-    } else {
-        "🔁 Boost"
-    };
-    let reply = render_reply_link(cfg, &note.in_reply_to);
+    let label = if boosted { "Un-boost" } else { "Boost" };
+    let replyctx = render_reply_link(cfg, &note.in_reply_to);
     let boosted_flag = if boosted { "1" } else { "0" };
     let replybox = render_reply_composer(&note.id, csrf);
+    let (name, handle, initial) = actor_display(&note.actor);
+    let handle_html = render_handle(&handle);
     format!(
-        r#"<article class="note">
-  <div class="note__meta"><a href="{url}" rel="noopener noreferrer nofollow">{actor}</a></div>
-  <div class="note__body">{body}</div>
-  <div class="note__meta">{date}{reply}</div>
-  <div class="note__actions">
-    <form method="post" action="{action}" data-boost-form data-boosted="{boosted_flag}" data-note-uri="{uri}">
-      <input type="hidden" name="csrf_token" value="{csrf}">
-      <input type="hidden" name="note_uri" value="{uri}">
-      <button class="btn btn-ghost btn-sm" type="submit">{label}</button>
-    </form>
-    {replybox}
+        r#"<article class="note">{avatar}
+  <div class="note__main">
+    <header class="note__head">
+      <a class="note__author" href="{actor_url}" rel="noopener noreferrer nofollow"><span class="note__name">{name}</span>{handle_html}</a>
+      <a class="note__time" href="{url}" rel="noopener noreferrer nofollow">{date}</a>
+    </header>{replyctx}
+    <div class="note__body">{body}</div>
+    <div class="note__actionbar">{replybox}
+      <form method="post" action="{action}" data-boost-form data-boosted="{boosted_flag}" data-note-uri="{uri}">
+        <input type="hidden" name="csrf_token" value="{csrf}">
+        <input type="hidden" name="note_uri" value="{uri}">
+        <button class="note-act note-act--boost" type="submit" title="Boost">{icon_boost}<span data-boost-label>{label}</span></button>
+      </form>
+      <a class="note-act" href="{url}" rel="noopener noreferrer nofollow" title="Original">{icon_ext}<span>Original</span></a>
+    </div>
   </div>
 </article>"#,
+        avatar = avatar_glyph("", &initial),
+        actor_url = esc(&note.actor),
         url = esc(&note.url),
-        actor = esc(&note.actor),
+        name = esc(&name),
+        handle_html = handle_html,
         body = render_note_html(&note.content),
         date = time_el(when),
-        reply = reply,
+        replyctx = replyctx,
         action = action,
         label = label,
         boosted_flag = boosted_flag,
         csrf = esc(csrf),
         uri = esc(&note.id),
         replybox = replybox,
+        icon_boost = ICON_BOOST,
+        icon_ext = ICON_EXTLINK,
     )
 }
 
@@ -1617,13 +1623,182 @@ fn validate_actor_url(raw: &str) -> Result<String, AppError> {
 // Render helpers
 // ---------------------------------------------------------------------------
 
+/// Derive a `(display name, @handle, initial)` triple for a remote actor. Federation gives us
+/// either a friendly display name or a raw actor URL; both resolve to something showable, and the
+/// initial drives a colored fallback avatar (no remote image is ever fetched). Pure string work.
+fn actor_display(actor: &str) -> (String, String, String) {
+    let a = actor.trim();
+    let initial_of = |name: &str| {
+        name.chars()
+            .find(|c| !c.is_whitespace())
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".to_string())
+    };
+    if let Some(rest) = a.strip_prefix("https://").or_else(|| a.strip_prefix("http://")) {
+        let mut parts = rest.splitn(2, '/');
+        let host = parts.next().unwrap_or("").trim_end_matches('/');
+        let path = parts.next().unwrap_or("");
+        let seg = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(host);
+        let name = seg.trim_start_matches('@');
+        let name = if name.is_empty() { host } else { name };
+        let handle = if host.is_empty() {
+            String::new()
+        } else {
+            format!("@{name}@{host}")
+        };
+        return (name.to_string(), handle, initial_of(name));
+    }
+    let name = if a.is_empty() { "Someone" } else { a };
+    (name.to_string(), String::new(), initial_of(name))
+}
+
+/// A neutral initial-based avatar span for a remote actor (`extra` adds a modifier class).
+fn avatar_glyph(extra: &str, initial: &str) -> String {
+    format!(
+        r#"<span class="avatar note__avatar{extra}" aria-hidden="true">{initial}</span>"#,
+        extra = extra,
+        initial = esc(initial),
+    )
+}
+
+/// A `.note__handle` span for a derived `@user@host`, or empty markup when it couldn't be derived.
+fn render_handle(handle: &str) -> String {
+    if handle.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<span class="note__handle">{}</span>"#, esc(handle))
+    }
+}
+
+/// The owner's 44px note avatar: their uploaded image, else a brand-tinted initial ("purple = you").
+fn owner_avatar(profile: &Profile, cfg: &crate::config::Config) -> String {
+    if profile.avatar_url.is_empty() {
+        avatar_glyph(" note__avatar--own", &initial_of(&cfg.display_name))
+    } else {
+        format!(
+            r#"<img class="note__avatar" src="{url}" alt="">"#,
+            url = esc(&profile.avatar_url),
+        )
+    }
+}
+
+/// The owner's 40px composer avatar (same idiom as the app-bar user chip).
+fn compose_avatar(profile: &Profile, cfg: &crate::config::Config) -> String {
+    if profile.avatar_url.is_empty() {
+        format!(
+            r#"<span class="avatar crier-compose__avatar" aria-hidden="true">{initial}</span>"#,
+            initial = esc(&initial_of(&cfg.display_name)),
+        )
+    } else {
+        format!(
+            r#"<img class="avatar crier-compose__avatar" src="{url}" alt="">"#,
+            url = esc(&profile.avatar_url),
+        )
+    }
+}
+
+/// First non-whitespace character of `s`, upper-cased (fallback for empty).
+fn initial_of(s: &str) -> String {
+    s.chars()
+        .find(|c| !c.is_whitespace())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// The "Follow someone" sidebar card (the /api/follow form, compact). Shared by index (via {{FOLLOW}})
+/// and the /home rail. The form action/field/csrf are byte-for-byte the old follow form.
+fn render_follow_card(csrf: &str) -> String {
+    format!(
+        r#"<section class="card"><div class="card__body">
+    <h2>Follow someone</h2>
+    <p class="crier-follow__hint">Paste a fediverse handle or actor URL — new posts land in <a href="/home">Home</a>.</p>
+    <form class="crier-follow__form" method="post" action="/api/follow">
+      <input type="hidden" name="csrf_token" value="{csrf}">
+      <input id="follow-target" name="target" class="input" placeholder="user@mastodon.social" required>
+      <button class="btn btn-primary" type="submit">Follow</button>
+    </form>
+  </div></section>"#,
+        csrf = esc(csrf),
+    )
+}
+
+/// The drill-down page head (thread / tag / lists / blocks / home / notifications): a brand glyph
+/// tile + title + a meta line. `glyph` is raw HTML (an inline SVG or a literal like `#`); `title`
+/// must be pre-escaped by the caller; `meta_html` is trusted markup the caller builds safely.
+fn render_pagehead(glyph: &str, title: &str, meta_html: &str) -> String {
+    format!(
+        r#"<div class="crier-pagehead">
+  <div class="crier-pagehead__glyph">{glyph}</div>
+  <div>
+    <h1 class="crier-pagehead__title">{title}</h1>
+    <div class="crier-pagehead__meta">{meta}</div>
+  </div>
+</div>"#,
+        glyph = glyph,
+        title = title,
+        meta = meta_html,
+    )
+}
+
+/// The shared page skeleton for every SSO page except the profile index (which keeps its template):
+/// doctype/head/app-bar, then the two-column crier-shell (feed spine + optional discovery rail).
+/// `active_tab` selects the feed-tab highlight; `main_html` is the feed column content (page head +
+/// items); `rail_html` renders the right sidebar when `Some` (else the shell is single-column).
+fn page_shell(
+    tab_title: &str,
+    page_title: &str,
+    email: &str,
+    active_tab: &str,
+    main_html: &str,
+    rail_html: Option<&str>,
+) -> String {
+    let solo = if rail_html.is_none() {
+        " crier-shell--solo"
+    } else {
+        ""
+    };
+    let rail = match rail_html {
+        Some(r) => format!(
+            r#"<aside class="crier-rail"><div class="crier-rail__inner">{r}</div></aside>"#,
+            r = r
+        ),
+        None => String::new(),
+    };
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>{tab_title} · Crier · HOLDFAST</title><style>{css}</style></head>
+<body class="page-reading">
+{topbar}
+<main class="crier-shell{solo}">
+  <div class="crier-main">
+{feedtabs}
+{main}
+  </div>
+{rail}
+</main>
+</body></html>"#,
+        tab_title = esc(tab_title),
+        css = app_css(),
+        topbar = topbar(page_title, email),
+        solo = solo,
+        feedtabs = feed_tabs(active_tab),
+        main = main_html,
+        rail = rail,
+    )
+}
+
 fn render_reply_link(cfg: &crate::config::Config, in_reply_to: &str) -> String {
     if in_reply_to.is_empty() {
         return String::new();
     }
     let href = thread_href_for_uri(cfg, in_reply_to).unwrap_or_else(|| in_reply_to.to_string());
     format!(
-        r#" · <a href="{href}" rel="noopener noreferrer nofollow">In reply to</a>"#,
+        r#"
+    <div class="note__replyctx">{icon}<a href="{href}" rel="noopener noreferrer nofollow">In reply to</a></div>"#,
+        icon = ICON_REPLYCTX,
         href = esc(&href),
     )
 }
@@ -1656,7 +1831,7 @@ fn render_reply_composer(uri: &str, csrf: &str) -> String {
     }
     format!(
         r#"<details class="note__reply">
-      <summary class="btn btn-ghost btn-sm">Reply</summary>
+      <summary class="note-act" title="Reply">{icon}<span>Reply</span></summary>
       <form class="note__replyform" method="post" action="/api/notes" data-reply-form>
         <input type="hidden" name="csrf_token" value="{csrf}">
         <input type="hidden" name="in_reply_to" value="{uri}">
@@ -1668,6 +1843,7 @@ fn render_reply_composer(uri: &str, csrf: &str) -> String {
         </div>
       </form>
     </details>"#,
+        icon = ICON_REPLY,
         csrf = esc(csrf),
         uri = esc(uri),
     )
@@ -1675,9 +1851,9 @@ fn render_reply_composer(uri: &str, csrf: &str) -> String {
 
 /// One timeline note card: rendered (escaped) content + a UTC date, plus owner-only edit/delete
 /// controls when `owned`. Every interpolated field is escaped.
-fn render_note(note: &Note, csrf: &str, owned: bool, cfg: &crate::config::Config) -> String {
+fn render_note(note: &Note, csrf: &str, owned: bool, cfg: &crate::config::Config, avatar: &str) -> String {
     let edited = if note.updated_at > 0 {
-        " · edited"
+        r#"<span class="note__edited">edited</span>"#
     } else {
         ""
     };
@@ -1687,22 +1863,31 @@ fn render_note(note: &Note, csrf: &str, owned: bool, cfg: &crate::config::Config
         String::new()
     };
     let media = render_media(&note.attachment_url);
-    let reply = render_reply_link(cfg, &note.in_reply_to);
+    let replyctx = render_reply_link(cfg, &note.in_reply_to);
     let replybox = render_reply_composer(&note_object_uri(cfg, &note.id), csrf);
     format!(
-        r#"<article class="note">
-  <div class="note__body">{body}</div>{media}
-  <div class="note__meta">{date}{edited} · <a href="/thread/{id}">Thread</a>{reply}</div>
-  <div class="note__actions">{replybox}</div>{controls}
+        r#"<article class="note">{avatar}
+  <div class="note__main">
+    <header class="note__head">
+      <a class="note__author" href="/"><span class="note__name">{name}</span><span class="note__handle">@{handle}</span></a>{edited}
+      <a class="note__time" href="/thread/{id}">{date}</a>{controls}
+    </header>{replyctx}
+    <div class="note__body">{body}</div>{media}
+    <div class="note__actionbar">{replybox}<a class="note-act" href="/thread/{id}" title="Thread">{icon_thread}<span>Thread</span></a></div>
+  </div>
 </article>"#,
+        avatar = avatar,
+        name = esc(&cfg.display_name),
+        handle = esc(&cfg.handle()),
+        edited = edited,
         id = esc(&note.id),
         body = render_note_html_tagged(&note.content),
         media = media,
         date = time_el(note.created_at),
-        edited = edited,
-        reply = reply,
+        replyctx = replyctx,
         replybox = replybox,
         controls = controls,
+        icon_thread = ICON_THREAD,
     )
 }
 
@@ -1726,25 +1911,30 @@ fn render_controls(note: &Note, csrf: &str) -> String {
     let id = esc(&note.id);
     let csrf = esc(csrf);
     format!(
-        r#"
-  <div class="note__actions">
-    <details class="note__edit">
-      <summary class="btn btn-ghost btn-sm">Edit</summary>
-      <form class="note__editform" method="post" action="/api/notes/{id}/edit">
-        <input type="hidden" name="csrf_token" value="{csrf}">
-        <div class="field">
-          <textarea name="content" class="composer__body" maxlength="5000" required>{content}</textarea>
-        </div>
-        <div class="actions">
-          <button class="btn btn-primary btn-sm" type="submit">Save</button>
-        </div>
-      </form>
-    </details>
-    <form method="post" action="/api/notes/{id}/delete" onsubmit="return confirm('Delete this note? This will federate a delete to your followers.');">
-      <input type="hidden" name="csrf_token" value="{csrf}">
-      <button class="btn btn-danger btn-sm" type="submit">Delete</button>
-    </form>
-  </div>"#,
+        r#"<details class="note__more">
+      <summary title="More" aria-label="More">{icon_more}</summary>
+      <div class="note__morepop">
+        <details class="note__edit">
+          <summary class="note__moreitem">{icon_edit}Edit</summary>
+          <form class="note__editform" method="post" action="/api/notes/{id}/edit">
+            <input type="hidden" name="csrf_token" value="{csrf}">
+            <div class="field">
+              <textarea name="content" class="composer__body" maxlength="5000" required>{content}</textarea>
+            </div>
+            <div class="actions">
+              <button class="btn btn-primary btn-sm" type="submit">Save</button>
+            </div>
+          </form>
+        </details>
+        <form method="post" action="/api/notes/{id}/delete" onsubmit="return confirm('Delete this note? This will federate a delete to your followers.');">
+          <input type="hidden" name="csrf_token" value="{csrf}">
+          <button class="note__moreitem note__moreitem--danger" type="submit">{icon_trash}Delete</button>
+        </form>
+      </div>
+    </details>"#,
+        icon_more = ICON_MORE,
+        icon_edit = ICON_EDIT,
+        icon_trash = ICON_TRASH,
         id = id,
         csrf = csrf,
         content = esc(&note.content),

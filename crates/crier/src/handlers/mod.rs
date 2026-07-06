@@ -102,13 +102,24 @@ pub fn render_note_html_tagged(content: &str) -> String {
 /// The 3x3 "All apps" grid glyph for the apex-portal back link (also the All-apps menu item).
 const ALLAPPS_SVG: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>"##;
 /// Lucide-style line icons for the app-bar nav + user menu.
-const ICON_USER: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"##;
-const ICON_HOME: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>"##;
-const ICON_LIST: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>"##;
-const ICON_BELL: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.8 14.29 18 12.6 18 8a6 6 0 0 0-12 0c0 4.6-1.8 6.29-2.74 7.33"/></svg>"##;
-const ICON_BAN: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 14.14 14.14"/></svg>"##;
+pub const ICON_USER: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"##;
+pub const ICON_HOME: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>"##;
+pub const ICON_LIST: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>"##;
+pub const ICON_BELL: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.8 14.29 18 12.6 18 8a6 6 0 0 0-12 0c0 4.6-1.8 6.29-2.74 7.33"/></svg>"##;
+pub const ICON_BAN: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 14.14 14.14"/></svg>"##;
 const ICON_CARET: &str = r##"<svg class="usermenu__caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>"##;
 const ICON_LOGOUT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>"##;
+
+// Lucide-style line icons for the redesigned feed (post cards, action bars, overflow menus).
+pub const ICON_REPLY: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/></svg>"##;
+pub const ICON_BOOST: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 9 3-3 3 3"/><path d="M13 18H7a2 2 0 0 1-2-2V6"/><path d="m22 15-3 3-3-3"/><path d="M11 6h6a2 2 0 0 1 2 2v10"/></svg>"##;
+pub const ICON_THREAD: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4c0-1.1.9-2 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>"##;
+pub const ICON_EXTLINK: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>"##;
+pub const ICON_MORE: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>"##;
+pub const ICON_REPLYCTX: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>"##;
+pub const ICON_IMAGE: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>"##;
+pub const ICON_EDIT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>"##;
+pub const ICON_TRASH: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>"##;
 
 /// Progressive-enhancement companion emitted right after the app-bar on every SSO page: a fixed
 /// toast host plus one small script that (1) renders relative timestamps from `<time data-ts>` (the
@@ -127,10 +138,10 @@ const TOPBAR_ENHANCE: &str = r#"
   function post(url,params){var b=Object.keys(params).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(params[k]);}).join('&');return fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},body:b}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();});}
   function rel(ts){var now=Math.floor(Date.now()/1000);var d=now-ts;if(d<0||isNaN(d))return null;if(d<60)return 'just now';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';if(d<2592000)return Math.floor(d/86400)+'d ago';return null;}
   Array.prototype.forEach.call(document.querySelectorAll('time.ts[data-ts]'),function(t){var r=rel(parseInt(t.getAttribute('data-ts'),10));if(r)t.textContent=r;});
-  var badge=document.querySelector('[data-notif-badge]');
-  if(badge){fetch('/api/notifications/unread',{credentials:'same-origin',headers:{'Accept':'application/json'}}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(d&&d.unread>0){badge.textContent=d.unread>99?'99+':String(d.unread);badge.removeAttribute('hidden');}}).catch(function(){});}
+  var badges=document.querySelectorAll('[data-notif-badge]');
+  if(badges.length){fetch('/api/notifications/unread',{credentials:'same-origin',headers:{'Accept':'application/json'}}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(d&&d.unread>0){var txt=d.unread>99?'99+':String(d.unread);Array.prototype.forEach.call(badges,function(b){b.textContent=txt;b.removeAttribute('hidden');});}}).catch(function(){});}
   Array.prototype.forEach.call(document.querySelectorAll('textarea[maxlength]'),function(ta){var max=parseInt(ta.getAttribute('maxlength'),10);if(!max)return;var c=document.createElement('div');c.className='char-counter';function upd(){var n=ta.value.length;c.textContent=n+'/'+max;if(n>=max)c.classList.add('is-max');else c.classList.remove('is-max');}if(ta.parentNode)ta.parentNode.appendChild(c);upd();ta.addEventListener('input',upd);});
-  function toggleBoost(form){var on=form.getAttribute('data-boosted')==='1';var uri=form.getAttribute('data-note-uri')||'';var btn=form.querySelector('button');if(!uri||!CSRF){form.submit();return;}if(btn)btn.setAttribute('aria-busy','true');var url=on?'/api/unboost/json':'/api/boost/json';post(url,{csrf_token:CSRF,note_uri:uri,from:'home'}).then(function(d){var nowOn=!!d.boosted;form.setAttribute('data-boosted',nowOn?'1':'0');form.setAttribute('action',nowOn?'/api/unboost':'/api/boost');if(btn){btn.removeAttribute('aria-busy');btn.textContent=nowOn?'🔁 Un-boost':'🔁 Boost';}toast(nowOn?'Boost added':'Boost removed',true);}).catch(function(){if(btn)btn.removeAttribute('aria-busy');toast('Could not update — try again',false);});}
+  function toggleBoost(form){var on=form.getAttribute('data-boosted')==='1';var uri=form.getAttribute('data-note-uri')||'';var btn=form.querySelector('button');if(!uri||!CSRF){form.submit();return;}if(btn)btn.setAttribute('aria-busy','true');var url=on?'/api/unboost/json':'/api/boost/json';post(url,{csrf_token:CSRF,note_uri:uri,from:'home'}).then(function(d){var nowOn=!!d.boosted;form.setAttribute('data-boosted',nowOn?'1':'0');form.setAttribute('action',nowOn?'/api/unboost':'/api/boost');if(btn){btn.removeAttribute('aria-busy');var lbl=btn.querySelector('[data-boost-label]');if(lbl){lbl.textContent=nowOn?'Un-boost':'Boost';}else{btn.textContent=nowOn?'Un-boost':'Boost';}}toast(nowOn?'Boost added':'Boost removed',true);}).catch(function(){if(btn)btn.removeAttribute('aria-busy');toast('Could not update — try again',false);});}
   document.addEventListener('submit',function(e){var f=e.target;if(!(f instanceof HTMLFormElement))return;if(f.hasAttribute('data-boost-form')){e.preventDefault();toggleBoost(f);}});
 })();
 </script>"#;
@@ -226,6 +237,34 @@ pub fn topbar(page_title: &str, email: &str) -> String {
         "{header}{enhance}",
         header = header,
         enhance = TOPBAR_ENHANCE
+    )
+}
+
+/// The feed-scope tab strip that sits directly under the app-bar on every page: "Which timeline am
+/// I looking at?" (Your posts / Following / Notifications). Deliberately worded apart from the
+/// app-bar section nav so it doesn't read as a duplicate menu — and because the canonical app-bar
+/// hides its nav below 720px, this strip IS the mobile section nav. `active` is one of
+/// "profile" | "home" | "notifications" | "" (a drill-down page highlights nothing). The
+/// Notifications tab carries a second live unread badge (the shared script fills every
+/// `[data-notif-badge]`).
+pub fn feed_tabs(active: &str) -> String {
+    let cls = |k: &str| if active == k { " is-active" } else { "" };
+    let aria = |k: &str| if active == k { r#" aria-current="page""# } else { "" };
+    format!(
+        r#"<nav class="tabs crier-feedtabs" aria-label="Timelines">
+  <a class="tab{p_cls}" href="/"{p_aria}>{icon_user}Your posts</a>
+  <a class="tab{h_cls}" href="/home"{h_aria}>{icon_home}Following</a>
+  <a class="tab{n_cls}" href="/notifications"{n_aria}>{icon_bell}Notifications<span class="nav-badge" data-notif-badge hidden aria-label="unread notifications"></span></a>
+</nav>"#,
+        p_cls = cls("profile"),
+        p_aria = aria("profile"),
+        h_cls = cls("home"),
+        h_aria = aria("home"),
+        n_cls = cls("notifications"),
+        n_aria = aria("notifications"),
+        icon_user = ICON_USER,
+        icon_home = ICON_HOME,
+        icon_bell = ICON_BELL,
     )
 }
 
