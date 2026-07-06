@@ -18,6 +18,12 @@ use thiserror::Error;
 
 use crate::model::{Category, Feed, Item, RiverEntry};
 
+const MAX_FETCH_ERROR_CHARS: usize = 500;
+
+fn truncate_fetch_error(error: &str) -> String {
+    error.chars().take(MAX_FETCH_ERROR_CHARS).collect()
+}
+
 /// Storage failure surfaced to the handler layer (mapped to a 500 `server_error`).
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -53,6 +59,15 @@ pub trait Store: Send + Sync {
         id: &str,
         title: &str,
         last_fetched: i64,
+    ) -> Result<(), StoreError>;
+
+    /// Record a failed fetch attempt for a feed. Missing feeds are ignored because the feed may
+    /// have been removed while a background fetch was in flight.
+    async fn record_fetch_failure(
+        &self,
+        id: &str,
+        now: i64,
+        error: &str,
     ) -> Result<(), StoreError>;
 
     /// Upsert one fetched item. Returns `Ok(true)` when newly inserted, `Ok(false)` when the
@@ -255,6 +270,24 @@ impl Store for InMemoryStore {
         if let Some(f) = feeds.iter_mut().find(|f| f.id == id) {
             f.title = title.to_string();
             f.last_fetched = Some(last_fetched);
+            f.last_error = None;
+            f.last_error_at = None;
+            f.consecutive_failures = 0;
+        }
+        Ok(())
+    }
+
+    async fn record_fetch_failure(
+        &self,
+        id: &str,
+        now: i64,
+        error: &str,
+    ) -> Result<(), StoreError> {
+        let mut feeds = self.feeds.lock().expect("feeds lock poisoned");
+        if let Some(f) = feeds.iter_mut().find(|f| f.id == id) {
+            f.last_error = Some(truncate_fetch_error(error));
+            f.last_error_at = Some(now);
+            f.consecutive_failures += 1;
         }
         Ok(())
     }
@@ -658,7 +691,7 @@ use sqlx::Row;
 
 /// Column list shared by every feed SELECT, so the row decoder stays in lock-step.
 const FEED_COLS: &str =
-    "id, owner_sub, url, title, last_fetched, created_at, category_id, full_content";
+    "id, owner_sub, url, title, last_fetched, created_at, category_id, full_content, last_error, last_error_at, consecutive_failures";
 /// Column list shared by every item SELECT, so the row decoder stays in lock-step.
 const ITEM_COLS: &str =
     "id, feed_id, guid, title, link, summary, published_at, read, full_text, starred";
@@ -737,6 +770,17 @@ impl PgStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("ALTER TABLE feeds ADD COLUMN IF NOT EXISTS last_error TEXT")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE feeds ADD COLUMN IF NOT EXISTS last_error_at BIGINT")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "ALTER TABLE feeds ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await?;
         // User-defined feed categories/groups (per owner).
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS feed_categories (\
@@ -788,6 +832,9 @@ impl PgStore {
             created_at: row.try_get("created_at")?,
             category_id: row.try_get::<Option<String>, _>("category_id")?,
             full_content: row.try_get("full_content")?,
+            last_error: row.try_get("last_error")?,
+            last_error_at: row.try_get("last_error_at")?,
+            consecutive_failures: row.try_get::<i32, _>("consecutive_failures")? as i64,
         })
     }
 
@@ -902,13 +949,38 @@ impl Store for PgStore {
         title: &str,
         last_fetched: i64,
     ) -> Result<(), StoreError> {
-        sqlx::query("UPDATE feeds SET title = $2, last_fetched = $3 WHERE id = $1")
+        sqlx::query(
+            "UPDATE feeds SET title = $2, last_fetched = $3, \
+                 last_error = NULL, last_error_at = NULL, consecutive_failures = 0 \
+             WHERE id = $1",
+        )
             .bind(id)
             .bind(title)
             .bind(last_fetched)
             .execute(&self.pool)
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn record_fetch_failure(
+        &self,
+        id: &str,
+        now: i64,
+        error: &str,
+    ) -> Result<(), StoreError> {
+        let error = truncate_fetch_error(error);
+        sqlx::query(
+            "UPDATE feeds SET last_error = $2, last_error_at = $3, \
+                 consecutive_failures = consecutive_failures + 1 \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(error)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
         Ok(())
     }
 
@@ -1313,6 +1385,9 @@ mod tests {
             url: url.into(),
             title: url.into(),
             last_fetched: None,
+            last_error: None,
+            last_error_at: None,
+            consecutive_failures: 0,
             created_at: created,
             category_id: None,
             full_content: false,

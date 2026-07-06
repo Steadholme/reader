@@ -18,6 +18,12 @@ pub struct Feed {
     pub title: String,
     /// Last successful fetch time, epoch seconds; `None` = never fetched yet.
     pub last_fetched: Option<i64>,
+    /// Last fetch failure text, if the feed is currently failing.
+    pub last_error: Option<String>,
+    /// Last fetch failure time, epoch seconds.
+    pub last_error_at: Option<i64>,
+    /// Consecutive fetch failures since the last successful fetch.
+    pub consecutive_failures: i64,
     /// Subscription time, epoch seconds.
     pub created_at: i64,
     /// Owning category id (`feed_categories.id`), or `None` when the feed is uncategorized. The

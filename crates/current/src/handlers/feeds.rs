@@ -124,6 +124,48 @@ pub async fn remove(
 }
 
 // ---------------------------------------------------------------------------
+// POST /feeds/{id}/refresh — force a fetch now
+// ---------------------------------------------------------------------------
+
+/// `POST /feeds/{id}/refresh` — CSRF-checked, owner-scoped forced fetch, then 303 to `/feeds`.
+pub async fn refresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<crate::handlers::river::CsrfForm>,
+) -> Result<Response, AppError> {
+    if !auth::verify_csrf(&headers, &form.csrf_token) {
+        return Err(AppError::BadRequest(
+            "Your session token expired. Reload the page and try again.".to_string(),
+        ));
+    }
+    let who = auth::identity(&headers);
+    let Some(feed) = state.store.get_feed(&id).await? else {
+        return Err(AppError::NotFound("Feed not found.".to_string()));
+    };
+    if feed.owner_sub != who.subject {
+        return Err(AppError::NotFound("Feed not found.".to_string()));
+    }
+
+    let now = now_secs();
+    match fetch_and_store(&state.http, state.store.as_ref(), &feed, now).await {
+        Ok(n) => tracing::info!(owner = %who.subject, feed = %id, new = n, "feed refreshed"),
+        Err(e) => {
+            tracing::warn!(owner = %who.subject, feed = %id, error = %e, "feed refresh failed");
+            if let Err(store_err) = state.store.record_fetch_failure(&id, now_secs(), &e).await {
+                tracing::warn!(
+                    feed = %id,
+                    error = %store_err,
+                    "could not record refresh failure"
+                );
+            }
+        }
+    }
+
+    Ok(redirect_see_other("/feeds"))
+}
+
+// ---------------------------------------------------------------------------
 // Categories: create / rename / delete / reorder + per-feed assignment
 // ---------------------------------------------------------------------------
 
@@ -440,6 +482,9 @@ async fn subscribe(state: &AppState, owner: &str, url: String, now: i64) -> Resu
         url: url.clone(),
         title: url.clone(), // placeholder until the first fetch learns the real <title>
         last_fetched: None,
+        last_error: None,
+        last_error_at: None,
+        consecutive_failures: 0,
         created_at: now,
         category_id: None,
         full_content: false,
@@ -489,7 +534,20 @@ fn spawn_initial_fetch(state: AppState, feed: Feed) {
     tokio::spawn(async move {
         match fetch_and_store(&state.http, state.store.as_ref(), &feed, now_secs()).await {
             Ok(n) => tracing::info!(url = feed.url, new = n, "initial fetch complete"),
-            Err(e) => tracing::warn!(url = feed.url, error = %e, "initial fetch failed (skipped)"),
+            Err(e) => {
+                tracing::warn!(url = feed.url, error = %e, "initial fetch failed (skipped)");
+                if let Err(store_err) = state
+                    .store
+                    .record_fetch_failure(&feed.id, now_secs(), &e)
+                    .await
+                {
+                    tracing::warn!(
+                        feed = %feed.id,
+                        error = %store_err,
+                        "could not record initial fetch failure"
+                    );
+                }
+            }
         }
     });
 }
@@ -732,6 +790,22 @@ fn render_feed_row(
         Some(ts) => format!("updated {}", fmt_rel(ts, now)),
         None => "not fetched yet".to_string(),
     };
+    let health = if feed.consecutive_failures > 0 {
+        let last_error = feed.last_error.as_deref().unwrap_or("unknown error");
+        let last_error_at = feed
+            .last_error_at
+            .map(|ts| fmt_rel(ts, now))
+            .unwrap_or_else(|| "unknown time".to_string());
+        format!(
+            "<span class=\"badge pill-down\" title=\"{error}\">failing &middot; {failures}&times;</span>\
+             <span class=\"muted\">last error {when}: {error}</span>",
+            error = esc(last_error),
+            failures = feed.consecutive_failures,
+            when = esc(&last_error_at),
+        )
+    } else {
+        String::new()
+    };
     // The title links to the feed's own site only when the URL is a safe http(s) link.
     let title_html = match safe_link(&feed.url) {
         Some(url) => format!(
@@ -790,15 +864,24 @@ fn render_feed_row(
         fc_next = fc_next,
         fc_label = fc_label,
     );
+    let refresh = format!(
+        "<form class=\"inline-form\" method=\"post\" action=\"/feeds/{id}/refresh\">\
+           <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+           <button class=\"btn btn-ghost btn-sm\" type=\"submit\">Refresh</button>\
+         </form>",
+        id = esc(&feed.id),
+        csrf = esc(csrf),
+    );
 
     format!(
         "<li class=\"feed-item\">\
            <div class=\"feed-item__main\">\
              {title_html} {unread_pill}\
-             <span class=\"feed-item__meta\"><span class=\"feed-item__url\">{url}</span><span>{fetched}</span></span>\
+             <span class=\"feed-item__meta\"><span class=\"feed-item__url\">{url}</span><span>{fetched}</span>{health}</span>\
            </div>\
            <span class=\"feed-item__actions\">\
              {assign}\
+             {refresh}\
              {full_content}\
              <form class=\"inline-form\" method=\"post\" action=\"/feeds/{id}/delete\" \
                onsubmit=\"return confirm('Remove this feed and its items?');\">\
@@ -811,8 +894,10 @@ fn render_feed_row(
         unread_pill = unread_pill,
         url = esc(&feed.url),
         fetched = esc(&fetched),
+        health = health,
         id = esc(&feed.id),
         assign = assign,
+        refresh = refresh,
         full_content = full_content,
         csrf = esc(csrf),
     )

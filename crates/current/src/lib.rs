@@ -20,6 +20,7 @@
 //! - `GET /feeds` — manage feeds (add form + categories + subscriptions grouped by category)
 //! - `POST /feeds` — add a feed by URL -> 303 `/feeds` (CSRF)
 //! - `POST /feeds/{id}/delete` — remove a feed -> 303 `/feeds` (CSRF)
+//! - `POST /feeds/{id}/refresh` — force-fetch a feed now -> 303 `/feeds` (CSRF)
 //! - `POST /feeds/{id}/category` — assign a feed to a category (or clear) -> 303 `/feeds` (CSRF)
 //! - `POST /feeds/{id}/full-content` — toggle per-feed full-content fetch -> 303 `/feeds` (CSRF)
 //! - `POST /categories` — create a category -> 303 `/feeds` (CSRF)
@@ -93,6 +94,7 @@ pub fn app(state: AppState) -> Router {
             get(handlers::feeds::list).post(handlers::feeds::add),
         )
         .route("/feeds/{id}/delete", post(handlers::feeds::remove))
+        .route("/feeds/{id}/refresh", post(handlers::feeds::refresh))
         .route("/feeds/{id}/category", post(handlers::feeds::assign_category))
         .route(
             "/feeds/{id}/full-content",
@@ -223,10 +225,24 @@ async fn poll_once(state: &AppState) {
         }
     };
     for feed in feeds {
-        match feed::fetch_and_store(&state.http, state.store.as_ref(), &feed, now_secs()).await {
+        let now = now_secs();
+        match feed::fetch_and_store(&state.http, state.store.as_ref(), &feed, now).await {
             Ok(n) if n > 0 => tracing::info!(url = feed.url, new = n, "poller: fetched new items"),
             Ok(_) => {}
-            Err(e) => tracing::warn!(url = feed.url, error = %e, "poller: fetch failed (skipped)"),
+            Err(e) => {
+                tracing::warn!(url = feed.url, error = %e, "poller: fetch failed (skipped)");
+                if let Err(store_err) = state
+                    .store
+                    .record_fetch_failure(&feed.id, now_secs(), &e)
+                    .await
+                {
+                    tracing::warn!(
+                        feed = %feed.id,
+                        error = %store_err,
+                        "poller: could not record fetch failure"
+                    );
+                }
+            }
         }
     }
 }
