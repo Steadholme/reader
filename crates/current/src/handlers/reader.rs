@@ -10,20 +10,21 @@
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::Response;
 
 use crate::article;
 use crate::auth;
 use crate::config::READER_SHORT_CONTENT_CHARS;
 use crate::error::AppError;
 use crate::feed::safe_link;
-use crate::handlers::{app_css, esc, fmt_rel, fmt_ts, userbox, SHIELD_SVG};
+use crate::handlers::{esc, fmt_rel, fmt_ts, html_with_csrf, page_shell, tile_initial, tile_tint};
 use crate::model::RiverEntry;
 use crate::{now_secs, AppState};
 
 const READER_HTML: &str = include_str!("../../templates/reader.html");
 
 /// Where the rendered readable text came from (drives the small provenance label).
+#[derive(Clone, Copy)]
 enum Source {
     /// Served from the previously-cached `full_text`.
     Cached,
@@ -64,8 +65,9 @@ pub async fn read(
     // Reading an item in-app marks it read, matching the `/i/{id}` open path (best-effort).
     let _ = state.store.mark_item_read(&id, &who.subject).await;
 
-    let html = render_reader(&entry, &paragraphs, source, &who.email, now_secs());
-    Ok((StatusCode::OK, Html(html)).into_response())
+    let csrf = auth::new_csrf_token();
+    let html = render_reader(&entry, &paragraphs, source, &who.email, now_secs(), &csrf);
+    Ok(html_with_csrf(StatusCode::OK, html, &csrf))
 }
 
 /// Decide what readable text to show: cached full text, a fresh fetch+extract (cached on success),
@@ -163,6 +165,7 @@ fn render_reader(
     source: Source,
     email: &str,
     now: i64,
+    csrf: &str,
 ) -> String {
     let item = &entry.item;
     let title = if item.title.trim().is_empty() {
@@ -172,41 +175,108 @@ fn render_reader(
     };
     let when = match item.published_at {
         Some(ts) => format!(
-            "<time class=\"reader__time\" title=\"{abs}\">{rel}</time>",
+            "<time class=\"cur-read__time\" title=\"{abs}\">{rel}</time>",
             abs = esc(&fmt_ts(ts)),
             rel = esc(&fmt_rel(ts, now)),
         ),
         None => String::new(),
     };
+    let safe_url = safe_link(&item.link);
     // Link out to the original article only when it is a safe http(s) URL.
-    let source_link = match safe_link(&item.link) {
+    let source_link = match safe_url.as_deref() {
         Some(url) => format!(
             "<a class=\"btn btn-secondary btn-sm\" href=\"{href}\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">Open original &#8599;</a>",
-            href = esc(&url),
+            href = esc(url),
         ),
         None => String::new(),
     };
+    let foot_link = match safe_url.as_deref() {
+        Some(url) => format!(
+            "<a class=\"btn btn-primary\" href=\"{href}\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">Open original &#8599;</a>",
+            href = esc(url),
+        ),
+        None => String::new(),
+    };
+    let domain_row = match safe_url.as_deref() {
+        Some(url) => reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+            .map(|host| {
+                format!(
+                    "<p class=\"cur-read__domain\"><a href=\"{href}\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">{host}</a></p>",
+                    href = esc(url),
+                    host = esc(&host),
+                )
+            })
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let star_label = if item.starred {
+        "★ Unstar"
+    } else {
+        "☆ Star"
+    };
+    let star = format!(
+        "<form class=\"inline-form\" method=\"post\" action=\"/i/{id}/star\">\
+           <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+           <input type=\"hidden\" name=\"filter\" value=\"unread\">\
+           <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{star_label}</button>\
+         </form>",
+        id = esc(&item.id),
+        csrf = esc(csrf),
+        star_label = star_label,
+    );
+    let readtime = if paragraphs.is_empty() {
+        String::new()
+    } else {
+        let words = paragraphs
+            .iter()
+            .map(|p| p.split_whitespace().count())
+            .sum::<usize>();
+        let minutes = usize::max(1, words / 220);
+        format!(
+            "<span class=\"cur-read__readtime\">{} min read</span>",
+            esc(&minutes.to_string())
+        )
+    };
+    let source_cls = if matches!(source, Source::Summary) {
+        " cur-provchip--summary"
+    } else {
+        ""
+    };
 
     let content = if paragraphs.is_empty() {
-        "<p class=\"reader__empty\">No readable content was found for this item. \
-           Try opening the original article.</p>"
-            .to_string()
+        "<p class=\"cur-read__empty\">No readable content was found for this item. Try opening the original article.</p>".to_string()
     } else {
         paragraphs
             .iter()
-            .map(|p| format!("<p class=\"reader__p\">{}</p>", esc(p)))
+            .map(|p| format!("<p>{}</p>", esc(p)))
             .collect::<String>()
     };
+    let tint = tile_tint(&entry.feed_title).to_string();
 
-    READER_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("river", Some(email)))
+    let main = READER_HTML
+        .replace("{{TINT}}", &esc(&tint))
+        .replace("{{TILE}}", &tile_initial(&entry.feed_title))
         .replace("{{FEED}}", &esc(&entry.feed_title))
         .replace("{{WHEN}}", &when)
+        .replace("{{READTIME}}", &readtime)
+        .replace("{{SOURCE_CLS}}", source_cls)
         .replace("{{SOURCE}}", &esc(source.label()))
         .replace("{{SOURCELINK}}", &source_link)
-        // TITLE appears in both <title> and <h1>; escape once, replace all occurrences.
+        .replace("{{STAR}}", &star)
+        .replace("{{DOMAINROW}}", &domain_row)
+        .replace("{{FOOTLINK}}", &foot_link)
         .replace("{{TITLE}}", &esc(&title))
-        .replace("{{CONTENT}}", &content)
+        .replace("{{CONTENT}}", &content);
+    page_shell(
+        &title,
+        "river",
+        None,
+        "",
+        " console--narrow",
+        Some(email),
+        &main,
+        "",
+    )
 }

@@ -18,7 +18,8 @@ use crate::config::{MAX_FEEDS_PER_OWNER, MAX_URL_CHARS};
 use crate::error::AppError;
 use crate::feed::{fetch_and_store, new_feed_id, parse_opml_urls, safe_link};
 use crate::handlers::{
-    app_css, esc, fmt_rel, html_with_csrf, redirect_see_other, userbox, SHIELD_SVG,
+    esc, fmt_rel, html_with_csrf, page_shell, redirect_see_other, tile_initial, tile_tint,
+    SHIELD_SVG,
 };
 use crate::model::{Category, Feed};
 use crate::{now_secs, random_alnum, AppState, FEED_ID_LEN};
@@ -592,18 +593,36 @@ fn render_feeds(
     };
     let unread_by_feed: HashMap<&str, i64> =
         unread.iter().map(|(id, n)| (id.as_str(), *n)).collect();
+    let unread_total: i64 = unread.iter().map(|(_, n)| *n).sum();
+    let stats = format!(
+        "<strong>{}</strong> feeds · <strong>{}</strong> categories · <strong>{}</strong> unread",
+        feeds.len(),
+        categories.len(),
+        unread_total,
+    );
+    let cats_open = if categories.is_empty() { "" } else { " open" };
 
     let categories_html = render_category_manager(categories, csrf);
     let list = render_grouped_feeds(feeds, categories, &unread_by_feed, csrf, now);
 
-    FEEDS_HTML
-        .replace("{{CSS}}", app_css())
+    let main = FEEDS_HTML
         .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("feeds", Some(&who.email)))
+        .replace("{{STATS}}", &stats)
+        .replace("{{CATS_OPEN}}", cats_open)
         .replace("{{ERROR}}", &error_block)
         .replace("{{CSRF}}", &esc(csrf))
         .replace("{{CATEGORIES}}", &categories_html)
-        .replace("{{FEEDS}}", &list)
+        .replace("{{FEEDS}}", &list);
+    page_shell(
+        "Feeds",
+        "feeds",
+        Some("feeds"),
+        "",
+        " cur-shell",
+        Some(&who.email),
+        &main,
+        "",
+    )
 }
 
 /// The category management block: a create form + one row per category (rename / move / delete).
@@ -644,7 +663,7 @@ fn render_category_manager(categories: &[Category], csrf: &str) -> String {
                     String::new()
                 };
                 format!(
-                    "<li class=\"feed-item\">\
+                    "<li class=\"cur-cat\">\
                        <form class=\"inline-form\" method=\"post\" action=\"/categories/{id}/rename\">\
                          <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
                          <input class=\"input\" type=\"text\" name=\"name\" value=\"{name}\" maxlength=\"120\" aria-label=\"Category name\">\
@@ -691,9 +710,7 @@ fn render_grouped_feeds(
     now: i64,
 ) -> String {
     if feeds.is_empty() {
-        return "<ul class=\"feed-list\"><li class=\"feed-item feed-item--empty\">No feeds yet. \
-                Add one above to start your river.</li></ul>"
-            .to_string();
+        return "<div class=\"empty\"><p class=\"empty__title\">No feeds yet. Add one above to start your river.</p></div>".to_string();
     }
 
     let mut out = String::new();
@@ -745,10 +762,12 @@ fn render_group(
 ) -> String {
     if group.is_empty() {
         return format!(
-            "<div class=\"console__head console__head--row\">\
+            "<section class=\"cur-group\">\
+             <div class=\"cur-group__head\">\
                <h3>{name}</h3><span class=\"count-pill\">0 unread</span>\
              </div>\
-             <ul class=\"feed-list\"><li class=\"feed-item feed-item--empty\">No feeds in this category.</li></ul>",
+             <ul class=\"feed-list\"><li class=\"feed-item feed-item--empty\">No feeds in this category.</li></ul>\
+             </section>",
             name = name_html,
         );
     }
@@ -764,10 +783,12 @@ fn render_group(
         })
         .collect::<String>();
     format!(
-        "<div class=\"console__head console__head--row\">\
+        "<section class=\"cur-group\">\
+         <div class=\"cur-group__head\">\
            <h3>{name}</h3><span class=\"count-pill\">{subtotal} unread</span>\
          </div>\
-         <ul class=\"feed-list\">{rows}</ul>",
+         <ul class=\"feed-list\">{rows}</ul>\
+         </section>",
         name = name_html,
         subtotal = subtotal,
         rows = rows,
@@ -790,22 +811,45 @@ fn render_feed_row(
         Some(ts) => format!("updated {}", fmt_rel(ts, now)),
         None => "not fetched yet".to_string(),
     };
-    let health = if feed.consecutive_failures > 0 {
+    let (dot_cls, dot_title, down_cls) = if feed.consecutive_failures > 0 {
+        ("down", "failing", " cur-row--down")
+    } else if feed.last_fetched.is_none() {
+        ("warn", "not fetched yet", "")
+    } else {
+        ("ok", "healthy", "")
+    };
+    let (health_badge, health_error) = if feed.consecutive_failures > 0 {
         let last_error = feed.last_error.as_deref().unwrap_or("unknown error");
         let last_error_at = feed
             .last_error_at
             .map(|ts| fmt_rel(ts, now))
             .unwrap_or_else(|| "unknown time".to_string());
-        format!(
-            "<span class=\"badge pill-down\" title=\"{error}\">failing &middot; {failures}&times;</span>\
-             <span class=\"muted\">last error {when}: {error}</span>",
-            error = esc(last_error),
-            failures = feed.consecutive_failures,
-            when = esc(&last_error_at),
+        (
+            format!(
+                "<span class=\"badge pill-down\" title=\"{error}\">failing &middot; {failures}&times;</span>",
+                error = esc(last_error),
+                failures = feed.consecutive_failures,
+            ),
+            format!(
+                "<span class=\"cur-row__error\">last error {when}: {error}</span>",
+                when = esc(&last_error_at),
+                error = esc(last_error),
+            ),
         )
     } else {
-        String::new()
+        (String::new(), String::new())
     };
+    let tile = tile_initial(&title);
+    let tint = tile_tint(&title);
+    let delete = format!(
+        "<form class=\"inline-form\" method=\"post\" action=\"/feeds/{id}/delete\" \
+           onsubmit=\"return confirm('Remove this feed and its items?');\">\
+           <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+           <button class=\"btn btn-danger btn-sm\" type=\"submit\">Remove</button>\
+         </form>",
+        id = esc(&feed.id),
+        csrf = esc(csrf),
+    );
     // The title links to the feed's own site only when the URL is a safe http(s) link.
     let title_html = match safe_link(&feed.url) {
         Some(url) => format!(
@@ -874,31 +918,42 @@ fn render_feed_row(
     );
 
     format!(
-        "<li class=\"feed-item\">\
+        "<li class=\"feed-item cur-row{down_cls}\">\
+           <span class=\"cur-dot cur-dot--{dot_cls}\" title=\"{dot_title}\"></span>\
+           <span class=\"cur-tile cur-tile--lg cur-tile--t{tint}\" aria-hidden=\"true\">{tile}</span>\
            <div class=\"feed-item__main\">\
-             {title_html} {unread_pill}\
-             <span class=\"feed-item__meta\"><span class=\"feed-item__url\">{url}</span><span>{fetched}</span>{health}</span>\
+             {title_html} {health_badge}\
+             <span class=\"feed-item__meta\"><span class=\"feed-item__url\">{url}</span><span>{fetched}</span></span>\
            </div>\
-           <span class=\"feed-item__actions\">\
-             {assign}\
+           {health_error}\
+           <span class=\"cur-row__end\">\
+             {unread_pill}\
              {refresh}\
-             {full_content}\
-             <form class=\"inline-form\" method=\"post\" action=\"/feeds/{id}/delete\" \
-               onsubmit=\"return confirm('Remove this feed and its items?');\">\
-               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
-               <button class=\"btn btn-danger btn-sm\" type=\"submit\">Remove</button>\
-             </form>\
+             <details class=\"cur-menu\">\
+               <summary aria-label=\"Feed options\">⋯</summary>\
+               <div class=\"cur-menu__pop\">\
+                 {assign}\
+                 {full_content}\
+                 <div class=\"cur-menu__sep\"></div>\
+                 {delete}\
+               </div>\
+             </details>\
            </span>\
          </li>",
+        down_cls = down_cls,
+        dot_cls = dot_cls,
+        dot_title = dot_title,
+        tint = tint,
+        tile = tile,
         title_html = title_html,
+        health_badge = health_badge,
         unread_pill = unread_pill,
         url = esc(&feed.url),
         fetched = esc(&fetched),
-        health = health,
-        id = esc(&feed.id),
+        health_error = health_error,
         assign = assign,
         refresh = refresh,
         full_content = full_content,
-        csrf = esc(csrf),
+        delete = delete,
     )
 }

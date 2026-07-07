@@ -5,7 +5,7 @@
 //! - [`feeds`] — feed management (`/feeds`): add by URL, remove.
 //!
 //! The shared design tokens / CSS are embedded (via `include_str!`) and inlined into every
-//! page, matching the HOLDFAST enterprise brand: brand gradient, indigo accent, cards,
+//! page, matching the HOLDFAST enterprise brand: brand gradient, Current azure, cards,
 //! buttons, the app-bar with the shield + wordmark + signed-in email + logout. ALL
 //! producer-supplied AND remote feed text is HTML-escaped on render (defense-in-depth against
 //! stored XSS); the service injects NO raw HTML.
@@ -47,12 +47,123 @@ const ICON_GRID: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="current
 const ICON_CARET: &str = r##"<svg class="usermenu__caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>"##;
 const ICON_ACCOUNT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"##;
 const ICON_LOGOUT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>"##;
+const ICON_INBOX: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>"##;
+const ICON_DOT: &str = r##"<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="5"/></svg>"##;
+const ICON_STAR: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87L18.18 21 12 17.77 5.82 21 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg>"##;
 
 /// Cross-subdomain SSO logout (terminated at the Keystone IdP behind the gateway).
 pub const LOGOUT_URL: &str = "https://sso.w33d.xyz/_gw/auth/logout";
 
 /// Branded error page shell.
 const ERROR_HTML: &str = include_str!("../../templates/error.html");
+
+/// Shared Current page chrome: document head, azure app-bar, optional section tabs, and shell width.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn page_shell(
+    head_title: &str,
+    active_nav: &str,
+    section: Option<&str>,
+    count_pill: &str,
+    shell_cls: &str,
+    email: Option<&str>,
+    main_inner: &str,
+    after_main: &str,
+) -> String {
+    let sections = section
+        .map(|active| section_tabs(Some(active), count_pill))
+        .unwrap_or_default();
+    format!(
+        concat!(
+            "<!DOCTYPE html>\n",
+            "<html lang=\"en\">\n",
+            "<head>\n",
+            "  <meta charset=\"utf-8\">\n",
+            "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
+            "  <meta name=\"color-scheme\" content=\"light\">\n",
+            "  <title>{title} · Current · HOLDFAST</title>\n",
+            "  <style>{css}</style>\n",
+            "</head>\n",
+            "<body class=\"page-console\">\n",
+            "  <header class=\"appbar\">\n",
+            "    <a class=\"appbar__brand\" href=\"/\" aria-label=\"HOLDFAST Current\">\n",
+            "      <span class=\"app-tile\" style=\"--app:#0369a1;--app-soft:#f0f9ff\" aria-hidden=\"true\">{shield}</span>\n",
+            "      <span class=\"appbar__name\"><b>Current</b><span>rss.w33d.xyz</span></span>\n",
+            "    </a>\n",
+            "    {userbox}\n",
+            "  </header>\n\n",
+            "  <main class=\"console{shell_cls}\">\n",
+            "{sections}",
+            "{main_inner}\n",
+            "  </main>\n",
+            "{after_main}",
+            "</body>\n",
+            "</html>"
+        ),
+        title = esc(head_title),
+        css = app_css(),
+        shield = SHIELD_SVG,
+        userbox = userbox(active_nav, email),
+        shell_cls = shell_cls,
+        sections = sections,
+        main_inner = main_inner,
+        after_main = after_main,
+    )
+}
+
+/// Sticky river/feed section navigation. The inner nav class must remain exactly `tabs`.
+pub(crate) fn section_tabs(active: Option<&str>, count_pill: &str) -> String {
+    let tab = |key: &str, href: &str, label: &str, icon: &str| {
+        let on = active == Some(key);
+        let active_cls = if on { " is-active" } else { "" };
+        let current = if on { " aria-current=\"page\"" } else { "" };
+        let pill = if on { count_pill } else { "" };
+        format!(
+            "<a class=\"tab{active_cls}\" href=\"{href}\"{current}>{icon}<span>{label}</span>{pill}</a>",
+            active_cls = active_cls,
+            href = href,
+            current = current,
+            icon = icon,
+            label = label,
+            pill = pill,
+        )
+    };
+    let feeds_on = active == Some("feeds");
+    let feeds_cls = if feeds_on { " is-active" } else { "" };
+    let feeds_current = if feeds_on {
+        " aria-current=\"page\""
+    } else {
+        ""
+    };
+    format!(
+        concat!(
+            "<div class=\"cur-sections\"><nav class=\"tabs\">",
+            "{unread}{starred}{all}",
+            "<a class=\"tab cur-tab--feeds{feeds_cls}\" href=\"/feeds\"{feeds_current}>{feeds_icon}<span>Feeds</span></a>",
+            "</nav></div>"
+        ),
+        unread = tab("unread", "/", "Unread", ICON_DOT),
+        starred = tab("starred", "/?filter=starred", "Starred", ICON_STAR),
+        all = tab("all", "/?filter=all", "All", ICON_INBOX),
+        feeds_cls = feeds_cls,
+        feeds_current = feeds_current,
+        feeds_icon = SHIELD_SVG,
+    )
+}
+
+/// Stable source tile initial, escaped for direct insertion into HTML.
+pub(crate) fn tile_initial(s: &str) -> String {
+    let initial = s
+        .chars()
+        .find(|ch| ch.is_alphanumeric())
+        .map(|ch| ch.to_uppercase().to_string())
+        .unwrap_or_else(|| "#".to_string());
+    esc(&initial)
+}
+
+/// Stable source tile tint, byte-identical to Magpie's tone convention.
+pub(crate) fn tile_tint(s: &str) -> usize {
+    s.bytes().map(usize::from).sum::<usize>() % 5 + 1
+}
 
 /// The app-bar right side (v2): the River/Feeds nav, an "All apps" waffle back to the apex
 /// portal, and a CSS focus-within avatar menu (Account · All apps · Log out). `active`
@@ -126,13 +237,20 @@ pub fn render_error(
     message: &str,
     email: Option<&str>,
 ) -> (StatusCode, Html<String>) {
-    let body = ERROR_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("", email))
+    let main = ERROR_HTML
         .replace("{{STATUS}}", &status.as_u16().to_string())
         .replace("{{HEADING}}", &esc(heading))
         .replace("{{MESSAGE}}", &esc(message));
+    let body = page_shell(
+        &status.as_u16().to_string(),
+        "",
+        None,
+        "",
+        "",
+        email,
+        &main,
+        "",
+    );
     (status, Html(body))
 }
 

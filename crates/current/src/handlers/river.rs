@@ -16,14 +16,15 @@ use crate::config::{RIVER_LIMIT, SUMMARY_SENTENCES};
 use crate::error::AppError;
 use crate::feed::safe_link;
 use crate::handlers::{
-    app_css, esc, fmt_rel, fmt_ts, html_with_csrf, redirect_found, redirect_see_other, userbox,
-    SHIELD_SVG,
+    esc, fmt_rel, fmt_ts, html_with_csrf, page_shell, redirect_found, redirect_see_other,
+    tile_initial, tile_tint,
 };
 use crate::model::RiverEntry;
 use crate::nlp::{self, Cluster};
 use crate::{now_secs, AppState};
 
 const RIVER_HTML: &str = include_str!("../../templates/river.html");
+const RIVER_TAIL: &str = include_str!("../../templates/river_tail.html");
 
 /// Shared form shape for the CSRF-only POSTs (mark read, mark all).
 #[derive(Debug, Deserialize)]
@@ -350,11 +351,18 @@ fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64, filte
     };
 
     let list = if entries.is_empty() {
+        let glyph = match filter {
+            "starred" => "☆",
+            "all" => "～",
+            _ => "✓",
+        };
         format!(
             "<div class=\"empty\">\
+               <div class=\"empty__ico\" aria-hidden=\"true\">{glyph}</div>\
                <p class=\"empty__title\">{title}</p>\
                <p class=\"empty__sub\">{sub} <a href=\"/feeds\">Manage feeds</a>.</p>\
              </div>",
+            glyph = glyph,
             title = esc(empty_copy.0),
             sub = esc(empty_copy.1),
         )
@@ -376,41 +384,25 @@ fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64, filte
             .join("")
     };
 
-    RIVER_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("river", Some(email)))
-        .replace("{{UNREAD}}", &esc(&count_label))
-        .replace("{{NOUN}}", noun)
-        .replace("{{LIMIT}}", &RIVER_LIMIT.to_string())
+    let count_pill = format!(
+        "<span class=\"count-pill\" data-count-pill data-noun=\"{noun}\" data-limit=\"{limit}\" aria-live=\"polite\">{label}</span>",
+        noun = noun,
+        limit = RIVER_LIMIT,
+        label = esc(&count_label),
+    );
+    let main = RIVER_HTML
         .replace("{{FILTER}}", filter)
-        .replace("{{FILTERS}}", &render_filters(filter))
         .replace("{{CSRF}}", &esc(csrf))
-        .replace("{{ENTRIES}}", &list)
-}
-
-/// The Unread / Starred / All filter tabs (native `.tabs`/`.tab` kit). The active view carries
-/// `is-active`.
-fn render_filters(filter: &str) -> String {
-    let tab = |key: &str, label: &str| {
-        let active = if key == filter { " is-active" } else { "" };
-        let href = if key == "unread" {
-            "/".to_string()
-        } else {
-            format!("/?filter={key}")
-        };
-        format!(
-            "<a class=\"tab{active}\" href=\"{href}\">{label}</a>",
-            active = active,
-            href = href,
-            label = label,
-        )
-    };
-    format!(
-        "<nav class=\"tabs\">{}{}{}</nav>",
-        tab("unread", "Unread"),
-        tab("starred", "Starred"),
-        tab("all", "All"),
+        .replace("{{ENTRIES}}", &list);
+    page_shell(
+        "River",
+        "river",
+        Some(filter),
+        &count_pill,
+        " console--narrow",
+        Some(email),
+        &main,
+        RIVER_TAIL,
     )
 }
 
@@ -454,10 +446,14 @@ fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str, filter: &s
     } else {
         "☆ Star"
     };
+    let read_cls = if item.read { " is-read" } else { "" };
+    let tile = tile_initial(&entry.feed_title);
+    let tint = tile_tint(&entry.feed_title);
 
     format!(
-        "<article class=\"entry\" data-entry tabindex=\"-1\">\
+        "<article class=\"entry{read_cls}\" data-entry tabindex=\"-1\">\
            <div class=\"entry__head\">\
+             <span class=\"cur-tile cur-tile--t{tint}\" aria-hidden=\"true\">{tile}</span>\
              <span class=\"feed-badge\">{feed}</span>\
              {starred_pill}\
              {when}\
@@ -478,6 +474,9 @@ fn render_entry(entry: &RiverEntry, csrf: &str, now: i64, also: &str, filter: &s
              </form>\
            </div>\
          </article>",
+        read_cls = read_cls,
+        tint = tint,
+        tile = tile,
         feed = esc(&entry.feed_title),
         starred_pill = starred_pill,
         when = when,

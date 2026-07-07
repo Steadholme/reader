@@ -1,37 +1,31 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>{{TITLE}} · Current · HOLDFAST</title>
-  <style>{{CSS}}</style>
-</head>
-<body class="page-console">
-  <header class="appbar">
-    <a class="appbar__brand" href="/" aria-label="HOLDFAST Feeds">
-      <span class="app-tile" style="--app:#ea580c;--app-soft:#fff3ec" aria-hidden="true">{{SHIELD}}</span>
-      <span class="appbar__name"><b>Feeds</b><span>rss.w33d.xyz</span></span>
-    </a>
-    {{USERBOX}}
-  </header>
+<div class="cur-progressbar" aria-hidden="true"></div>
 
-  <main class="console console--narrow">
-    <article class="reader">
-      <div class="reader__head">
-        <span class="feed-badge">{{FEED}}</span>
-        {{WHEN}}
-        <span class="reader__source">{{SOURCE}}</span>
-      </div>
-      <h1 class="reader__title">{{TITLE}}</h1>
-      <div class="reader__actions">
-        {{SOURCELINK}}
-        <a class="btn btn-ghost btn-sm" href="/">Back to river</a>
-      </div>
-      <div class="reader__body">
-        {{CONTENT}}
-      </div>
-    </article>
-  </main>
-</body>
-</html>
+<div class="cur-readbar">
+  <a class="btn btn-ghost btn-sm" href="/">&larr; Back to river</a>
+  <div class="cur-readbar__actions">
+    {{STAR}}
+    {{SOURCELINK}}
+  </div>
+</div>
+
+<div class="cur-readshell">
+  <article class="cur-read">
+    <div class="cur-read__head">
+      <span class="cur-tile cur-tile--sm cur-tile--t{{TINT}}" aria-hidden="true">{{TILE}}</span>
+      <span class="cur-read__feed">{{FEED}}</span>
+      {{WHEN}}
+      {{READTIME}}
+      <span class="cur-provchip{{SOURCE_CLS}}">{{SOURCE}}</span>
+    </div>
+    <h1 class="cur-read__title">{{TITLE}}</h1>
+    {{DOMAINROW}}
+    <hr class="cur-read__rule">
+    <div class="cur-prose">
+      {{CONTENT}}
+    </div>
+    <footer class="cur-read__foot">
+      {{FOOTLINK}}
+      <a class="btn btn-ghost btn-sm" href="/">Back to river</a>
+    </footer>
+  </article>
+</div>
