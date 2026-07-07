@@ -78,8 +78,23 @@ html[lang^="ja"] body,html[lang^="zh"] body{ letter-spacing:normal; }
   /* 淡描边变体(给 pill/tag 边框) */
   --ok-border:color-mix(in srgb,var(--ok) 24%,#fff); --warn-border:color-mix(in srgb,var(--warn) 24%,#fff);
   --down-border:color-mix(in srgb,var(--down) 24%,#fff); --info-border:color-mix(in srgb,var(--info) 24%,#fff);
+  --accent-border:var(--accent-soft-2); --brand-border:color-mix(in srgb,var(--brand) 24%,#fff);
+  --scrim:color-mix(in srgb,var(--ink) 44%,transparent); --appbar-h:56px;
+  --tone-2:var(--c-indigo-600); --tone-2-soft:var(--c-indigo-50); --tone-2-ink:var(--c-indigo-700);
+  --tone-3:var(--c-green-600); --tone-3-soft:var(--c-green-50); --tone-3-ink:var(--c-green-700);
+  --tone-4:var(--c-amber-600); --tone-4-soft:var(--c-amber-50); --tone-4-ink:var(--c-amber-700);
+  --tone-5:var(--c-cyan-600); --tone-5-soft:var(--c-cyan-50); --tone-5-ink:var(--c-cyan-700);
   /* per-service 换肤覆盖点(库给默认,服务在 theme.css 重定向) */
   --app:var(--accent); --app-soft:var(--accent-soft);
   /* v1→v2 别名桥:让 baseline 服务不改 markup 即可迁移 */
   --radius:var(--r); --radius-md:var(--r-sm); --radius-sm:var(--r-xs);
+}
+
+/* ============ L1.5 · density([data-density=compact] console opt-in;默认视觉零变化)============ */
+/* 只准出现几何/字号 token;颜色、圆角、阴影、动效严禁进此块。 */
+[data-density="compact"]{
+  --tap:32px;
+  --sp-3:10px; --sp-4:12px; --sp-5:16px; --sp-6:20px; --sp-8:24px;
+  --fs-body:13.5px; --lh-body:1.45;
+  --fs-h1:20px; --fs-h2:16px; --fs-h3:13.5px; --fs-stat:22px;
 }
