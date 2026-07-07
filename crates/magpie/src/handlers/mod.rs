@@ -37,7 +37,7 @@ pub const SHIELD_SVG: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="cu
 
 /// Lucide-style line icons for the app-bar (nav + user menu).
 const ICON_LIST: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>"##;
-const ICON_HIGHLIGHT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg>"##;
+pub(crate) const ICON_HIGHLIGHT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg>"##;
 const ICON_GRID: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>"##;
 const ICON_CARET: &str = r##"<svg class="usermenu__caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>"##;
 const ICON_ACCOUNT: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"##;
@@ -48,6 +48,122 @@ pub const LOGOUT_URL: &str = "https://sso.w33d.xyz/_gw/auth/logout";
 
 /// Branded error page shell.
 const ERROR_HTML: &str = include_str!("../../templates/error.html");
+
+/// Page-width variants for the shared Magpie shell.
+#[derive(Clone, Copy)]
+pub(crate) enum Shell {
+    Default,
+    Solo,
+    Narrow,
+    Reader,
+}
+
+const ICON_INBOX: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>"##;
+const ICON_DOT: &str = r##"<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="5"/></svg>"##;
+const ICON_STAR: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87L18.18 21 12 17.77 5.82 21 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg>"##;
+const ICON_ARCHIVE: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>"##;
+pub(crate) const ICON_GLOBE: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10z"/></svg>"##;
+pub(crate) const ICON_SEARCH: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>"##;
+pub(crate) const ICON_BOOKMARK: &str = SHIELD_SVG;
+
+/// Shared page chrome: document head, canonical app-bar, optional section tabs, and shell width.
+pub(crate) fn page_shell(
+    head_title: &str,
+    userbox_title: &str,
+    email: Option<&str>,
+    active_section: Option<&str>,
+    with_density: bool,
+    variant: Shell,
+    main_html: &str,
+    rail_html: Option<&str>,
+) -> String {
+    let cls = match variant {
+        Shell::Default => "",
+        Shell::Solo => " mg-shell--solo",
+        Shell::Narrow => " console--narrow",
+        Shell::Reader => " mg-shell--reader",
+    };
+    let sections = if active_section.is_some() || with_density || matches!(variant, Shell::Solo) {
+        section_tabs(active_section, with_density)
+    } else {
+        String::new()
+    };
+    let content = match variant {
+        Shell::Default => {
+            let rail = rail_html.unwrap_or("");
+            format!("<div class=\"magpie-layout\">{main_html}<aside class=\"rail\">{rail}</aside></div>")
+        }
+        _ => match rail_html {
+            Some(rail) => format!("{main_html}{rail}"),
+            None => main_html.to_string(),
+        },
+    };
+    format!(
+        concat!(
+            "<!DOCTYPE html>\n",
+            "<html lang=\"en\">\n",
+            "<head>\n",
+            "  <meta charset=\"utf-8\">\n",
+            "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
+            "  <meta name=\"color-scheme\" content=\"light\">\n",
+            "  <title>{title}</title>\n",
+            "  <style>{css}</style>\n",
+            "</head>\n",
+            "<body class=\"page-console\">\n",
+            "  <header class=\"appbar\">\n",
+            "    <a class=\"appbar__brand\" href=\"/\" aria-label=\"HOLDFAST Clips\">\n",
+            "      <span class=\"app-tile\" style=\"--app:#db2777;--app-soft:#fdf0f6\" aria-hidden=\"true\">{shield}</span>\n",
+            "      <span class=\"appbar__name\"><b>Clips</b><span>clip.w33d.xyz</span></span>\n",
+            "    </a>\n",
+            "    {userbox}\n",
+            "  </header>\n\n",
+            "  <main class=\"console{cls}\">\n",
+            "{sections}",
+            "{content}\n",
+            "  </main>\n",
+            "</body>\n",
+            "</html>"
+        ),
+        title = esc(head_title),
+        css = app_css(),
+        shield = SHIELD_SVG,
+        userbox = userbox(userbox_title, email),
+        cls = cls,
+        sections = sections,
+        content = content,
+    )
+}
+
+/// Sticky library section navigation used by the list, search, highlights, and sources pages.
+pub(crate) fn section_tabs(active: Option<&str>, with_density: bool) -> String {
+    let tabs = [
+        ("all", "/", "All", ICON_INBOX),
+        ("unread", "/?view=unread", "Unread", ICON_DOT),
+        ("favorites", "/?view=favorites", "Favorites", ICON_STAR),
+        ("archive", "/?view=archive", "Archive", ICON_ARCHIVE),
+        ("highlights", "/highlights", "Highlights", ICON_HIGHLIGHT),
+        ("sites", "/sites", "Sources", ICON_GLOBE),
+    ]
+    .iter()
+    .map(|(key, href, label, icon)| {
+        let on = active == Some(*key);
+        let cls = if on {
+            "tab magpie-tab is-active magpie-tab--active"
+        } else {
+            "tab magpie-tab"
+        };
+        let current = if on { " aria-current=\"page\"" } else { "" };
+        format!("<a class=\"{cls}\" href=\"{href}\"{current}>{icon}<span>{label}</span></a>")
+    })
+    .collect::<Vec<_>>()
+    .join("");
+    let density = if with_density {
+        "<span class=\"tabs--window mg-density\" aria-label=\"Density\"><button class=\"tab is-active\" type=\"button\" data-density=\"comfortable\">Comfortable</button><button class=\"tab\" type=\"button\" data-density=\"compact\">Compact</button></span>"
+    } else {
+        ""
+    };
+    format!("<nav class=\"tabs mg-sections\" aria-label=\"Library\">{tabs}{density}</nav>")
+}
 
 /// Format epoch seconds as a compact UTC timestamp `YYYY-MM-DD HH:MM:SSZ`.
 pub fn fmt_ts(secs: i64) -> String {
@@ -153,13 +269,20 @@ pub fn render_error(
     message: &str,
     email: Option<&str>,
 ) -> (StatusCode, Html<String>) {
-    let body = ERROR_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("Magpie", email))
+    let main = ERROR_HTML
         .replace("{{STATUS}}", &status.as_u16().to_string())
         .replace("{{HEADING}}", &esc(heading))
         .replace("{{MESSAGE}}", &esc(message));
+    let body = page_shell(
+        &format!("{} · Magpie · HOLDFAST", status.as_u16()),
+        "Magpie",
+        email,
+        None,
+        false,
+        Shell::Narrow,
+        &main,
+        None,
+    );
     (status, Html(body))
 }
 

@@ -1,47 +1,57 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Save to HOLDFAST · Magpie</title>
-  <style>{{CSS}}</style>
-</head>
-<body class="page-console">
-  <header class="appbar">
-    <a class="appbar__brand" href="/" aria-label="HOLDFAST Clips">
-      <span class="app-tile" style="--app:#db2777;--app-soft:#fdf0f6" aria-hidden="true">{{SHIELD}}</span>
-      <span class="appbar__name"><b>Clips</b><span>clip.w33d.xyz</span></span>
-    </a>
-    {{USERBOX}}
-  </header>
-
-  <main class="console console--narrow">
-    <section class="card card--message">
-      <div class="card__body">
-        <h1 class="message-heading">Save this page?</h1>
-        <p class="save-url">{{URL_TEXT}}</p>
-        <form method="post" action="/clip" id="saveForm" class="save-confirm">
-          <input type="hidden" name="csrf_token" value="{{CSRF}}">
-          <input type="hidden" name="url" value="{{URL_ATTR}}">
-          <div class="actions actions--center">
-            <button class="btn btn-primary" type="submit" id="saveBtn" autofocus>Save to reading list</button>
-            <a class="btn btn-ghost" href="/">Cancel</a>
-          </div>
-        </form>
-        <p class="hint hint--muted" id="autonote">Saving…</p>
+<section class="card card--message mg-savecard">
+  <div class="mg-savecard__bar" aria-hidden="true"></div>
+  <div class="card__body">
+    <div class="mg-savecard__glyph" aria-hidden="true">{{ICON_BOOKMARK}}</div>
+    <h1 class="message-heading">Save this page?</h1>
+    <p class="mg-savecard__host">{{URL_HOST}}</p>
+    <p class="save-url">{{URL_TEXT}}</p>
+    <form method="post" action="/clip" id="saveForm" class="save-confirm">
+      <input type="hidden" name="csrf_token" value="{{CSRF}}">
+      <input type="hidden" name="url" value="{{URL_ATTR}}">
+      <details class="mg-savecard__tags">
+        <summary>Add tags</summary>
+        <input class="input" type="text" name="tags" placeholder="rust, reading, later" autocomplete="off">
+      </details>
+      <div class="actions actions--center">
+        <button class="btn btn-primary" type="submit" id="saveBtn" autofocus>Save to reading list</button>
+        <a class="btn btn-ghost" href="/">Cancel</a>
       </div>
-    </section>
-  </main>
+    </form>
+    <p class="hint hint--muted" id="autonote">Saving…</p>
+    <p class="hint hint--muted mg-savecard__note">Re-saving a page you already clipped never makes a duplicate.</p>
+  </div>
+</section>
 
-  <script>
-    // One-click: auto-submit once on load. Refreshing is safe — re-saving an already-saved URL
-    // is de-duplicated server-side, never a duplicate clip.
-    (function () {
-      var f = document.getElementById('saveForm');
-      var note = document.getElementById('autonote');
-      if (f) { try { f.requestSubmit ? f.requestSubmit() : f.submit(); } catch (e) { if (note) { note.textContent = ''; } } }
-    })();
-  </script>
-</body>
-</html>
+<script>
+  // One-click: auto-submit once on load. Refreshing is safe because the server de-duplicates.
+  (function () {
+    var f = document.getElementById('saveForm');
+    var card = document.querySelector('.mg-savecard');
+    var btn = document.getElementById('saveBtn');
+    var note = document.getElementById('autonote');
+    var tags = f ? f.querySelector('.mg-savecard__tags') : null;
+    var manual = false;
+    function cancelAuto() {
+      manual = true;
+      if (card) card.classList.remove('is-saving');
+      if (btn) btn.removeAttribute('aria-busy');
+      if (note) note.textContent = '';
+    }
+    if (!f) return;
+    if (card) card.classList.add('is-saving');
+    if (btn) btn.setAttribute('aria-busy', 'true');
+    ['pointerdown', 'keydown'].forEach(function (ev) { f.addEventListener(ev, cancelAuto, { once: true }); });
+    if (tags) tags.addEventListener('toggle', cancelAuto, { once: true });
+    setTimeout(function () {
+      if (manual) return;
+      try {
+        sessionStorage.setItem('magpie:saved', f.elements.url ? f.elements.url.value : '');
+        f.requestSubmit ? f.requestSubmit() : f.submit();
+      } catch (e) {
+        if (card) card.classList.remove('is-saving');
+        if (btn) btn.removeAttribute('aria-busy');
+        if (note) note.textContent = '';
+      }
+    }, 700);
+  })();
+</script>

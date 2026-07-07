@@ -1,46 +1,26 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>{{TITLE}} · Magpie · HOLDFAST</title>
-  <style>{{CSS}}</style>
-</head>
-<body class="page-console">
-  <header class="appbar">
-    <a class="appbar__brand" href="/" aria-label="HOLDFAST Clips">
-      <span class="app-tile" style="--app:#db2777;--app-soft:#fdf0f6" aria-hidden="true">{{SHIELD}}</span>
-      <span class="appbar__name"><b>Clips</b><span>clip.w33d.xyz</span></span>
-    </a>
-    {{USERBOX}}
-  </header>
+<div class="mg-progressbar" aria-hidden="true"><span class="mg-progressbar__fill" id="readerBarFill"></span></div>
+<div class="console__head console__head--row mg-readbar">
+  <a class="btn btn-ghost btn-sm" href="/">&larr; Reading list</a>
+  <div class="reader-actions mg-readbar__actions">
+    <a class="btn btn-ghost btn-sm" href="/highlights">My highlights</a>
+    <a class="btn btn-ghost btn-sm" href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">Open original</a>
+    {{FAVORITE}}
+    {{ARCHIVE}}
+    {{DELETE}}
+  </div>
+</div>
 
-  <main class="console console--reader">
-    <div class="console__head console__head--row">
-      <a class="btn btn-ghost btn-sm" href="/">&larr; Reading list</a>
-      <div class="reader-actions">
-        <a class="btn btn-ghost btn-sm" href="/highlights">My highlights</a>
-        <a class="btn btn-ghost btn-sm" href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">Open original</a>
-        {{FAVORITE}}
-        {{ARCHIVE}}
-        {{DELETE}}
-      </div>
+<div class="mg-readshell">
+  <article class="mg-read">
+    <h1 class="mg-read__title">{{TITLE}}</h1>
+    <div class="mg-read__byline">{{META}}</div>
+    <p class="reader-source"><a href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">{{URL_TEXT}}</a></p>
+    <hr class="mg-read__rule">
+    {{TAGS}}
+    <div class="reader-body mg-prose">
+      {{CONTENT}}
     </div>
-
-    <div class="reader-layout">
-      <article class="reader">
-        <h1 class="reader-title">{{TITLE}}</h1>
-        <p class="reader-meta">{{META}}</p>
-        <p class="reader-source"><a href="{{URL_ATTR}}" target="_blank" rel="noopener noreferrer nofollow">{{URL_TEXT}}</a></p>
-        {{TAGS}}
-        <div class="reader-body">
-          {{CONTENT}}
-        </div>
-      </article>
-      {{HIGHLIGHTS}}
-    </div>
-    {{PROGRESS}}
-  </main>
-</body>
-</html>
+  </article>
+  {{HIGHLIGHTS}}
+</div>
+{{PROGRESS}}

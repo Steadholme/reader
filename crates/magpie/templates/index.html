@@ -1,82 +1,23 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Reading list · Magpie · HOLDFAST</title>
-  <style>{{CSS}}</style>
-</head>
-<body class="page-console">
-  <header class="appbar">
-    <a class="appbar__brand" href="/" aria-label="HOLDFAST Clips">
-      <span class="app-tile" style="--app:#db2777;--app-soft:#fdf0f6" aria-hidden="true">{{SHIELD}}</span>
-      <span class="appbar__name"><b>Clips</b><span>clip.w33d.xyz</span></span>
-    </a>
-    {{USERBOX}}
-  </header>
+<div class="console__head mg-pagehead">
+  <span class="mg-pagehead__glyph" aria-hidden="true">{{ICON_BOOKMARK}}</span>
+  <div>
+    <h1 class="mg-pagehead__title">Read later</h1>
+    <p class="sub mg-pagehead__sub">Clip web pages to read later. Magpie fetches each page, pulls out the readable text, and saves it to your list.</p>
+  </div>
+</div>
 
-  <main class="console">
-    <div class="console__head">
-      <h1>Read later</h1>
-      <p class="sub">Clip web pages to read later. Magpie fetches each page, pulls out the readable text, and saves it to your list.</p>
-    </div>
-
-    <div class="magpie-layout">
-      <section class="reading">
-        <form class="search-bar" method="get" action="/search" role="search">
-          <input class="search-input" type="search" name="q" inputmode="search" autocomplete="off"
-                 placeholder="Search your clips…" aria-label="Search your clips">
-          <button class="btn btn-secondary btn-sm" type="submit">Search</button>
-        </form>
-        <div class="saved-views" data-saved-views>{{VIEWS}}</div>
-        <div class="magpie-tabs magpie-tabs--row">
-          <div class="magpie-tabs__group">{{TABS}}</div>
-          <a class="magpie-tab" href="/highlights">Highlights</a>
-          <a class="magpie-tab" href="/sites">Sources</a>
-        </div>
-        {{TOOLBAR}}
-        <ul class="clip-list">
-          {{LIST}}
-        </ul>
-      </section>
-
-      <aside class="rail">
-        <section class="card">
-          <div class="card__head"><h2>Save a link</h2></div>
-          <div class="card__body">
-            <form method="post" action="/clip" class="save-form">
-              <input type="hidden" name="csrf_token" value="{{CSRF}}">
-              <div class="field">
-                <label for="url">Page URL</label>
-                <input type="url" id="url" name="url" inputmode="url" autocomplete="off"
-                       placeholder="https://example.com/article" required>
-              </div>
-              <div class="field">
-                <label for="tags">Tags <span class="field-hint">(optional, comma-separated)</span></label>
-                <input type="text" id="tags" name="tags" autocomplete="off"
-                       placeholder="rust, reading, later">
-              </div>
-              <div class="actions">
-                <button class="btn btn-primary" type="submit">Save to reading list</button>
-              </div>
-            </form>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card__head"><h2>One-click bookmarklet</h2></div>
-          <div class="card__body">
-            <p class="hint">Drag this button to your bookmarks bar. Click it on any page to save it to HOLDFAST.</p>
-            <p class="bookmarklet-wrap">
-              <a class="btn btn-secondary bookmarklet" href="{{BOOKMARKLET_HREF}}"
-                 onclick="return false;" draggable="true">Save to HOLDFAST</a>
-            </p>
-            <p class="hint hint--muted">It opens a small tab that saves the current page through your single sign-on session.</p>
-          </div>
-        </section>
-      </aside>
-    </div>
-  </main>
-</body>
-</html>
+<section class="reading">
+  <form class="search-bar mg-search" method="get" action="/search" role="search">
+    <label class="mg-search__field">
+      <span class="mg-search__ico" aria-hidden="true">{{ICON_SEARCH}}</span>
+      <input class="search-input" type="search" name="q" inputmode="search" autocomplete="off"
+             placeholder="Search your clips…" aria-label="Search your clips">
+    </label>
+    <button class="btn btn-primary btn-sm" type="submit">Search</button>
+  </form>
+  {{VIEWS}}
+  {{TOOLBAR}}
+  <ul class="clip-list">
+    {{LIST}}
+  </ul>
+</section>

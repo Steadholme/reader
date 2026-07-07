@@ -25,7 +25,10 @@ use crate::config::{
 use crate::error::AppError;
 use crate::extract;
 use crate::fetch::parse_http_url;
-use crate::handlers::{app_css, bookmarklet_href, esc, fmt_ts, md_escape, userbox, SHIELD_SVG};
+use crate::handlers::{
+    bookmarklet_href, esc, fmt_ts, md_escape, page_shell, Shell, ICON_BOOKMARK, ICON_GLOBE,
+    ICON_HIGHLIGHT, ICON_SEARCH,
+};
 use crate::model::{
     clamp_progress, normalize_tags, reading_minutes, word_count, Clip, ClipQuery, Cursor, Filter,
     Highlight, SavedView,
@@ -192,13 +195,22 @@ pub async fn clip_form(
     let url = parsed.to_string();
 
     let csrf = auth::new_csrf_token();
-    let html = SAVE_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("Save", Some(&who.email)))
+    let main = SAVE_HTML
+        .replace("{{ICON_BOOKMARK}}", ICON_BOOKMARK)
         .replace("{{CSRF}}", &esc(&csrf))
         .replace("{{URL_ATTR}}", &esc(&url))
-        .replace("{{URL_TEXT}}", &esc(&url));
+        .replace("{{URL_TEXT}}", &esc(&url))
+        .replace("{{URL_HOST}}", &esc(parsed.host_str().unwrap_or("")));
+    let html = page_shell(
+        "Save to HOLDFAST · Magpie",
+        "Save",
+        Some(&who.email),
+        None,
+        false,
+        Shell::Narrow,
+        &main,
+        None,
+    );
     Ok(html_with_csrf(StatusCode::OK, html, &csrf))
 }
 
@@ -1447,50 +1459,64 @@ fn render_index(
     clips: &[Clip],
     auto_archive: bool,
 ) -> String {
-    let tabs = render_tabs(query.filter);
     // The return-view token used by the bulk/settings forms so an action keeps the current tab.
     let view = query.filter.as_str();
-    INDEX_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("Reading list", Some(&who.email)))
-        .replace("{{CSRF}}", &esc(csrf))
-        .replace(
-            "{{BOOKMARKLET_HREF}}",
-            &esc(&bookmarklet_href(&state.config.public_base_url)),
-        )
+    let main = INDEX_HTML
+        .replace("{{ICON_BOOKMARK}}", ICON_BOOKMARK)
+        .replace("{{ICON_SEARCH}}", ICON_SEARCH)
         .replace(
             "{{VIEWS}}",
             &render_views_bar(views, query, csrf, view_error),
         )
-        .replace("{{TABS}}", &tabs)
         .replace("{{TOOLBAR}}", &render_toolbar(csrf, view, auto_archive))
-        .replace("{{LIST}}", &render_list(clips, csrf, query))
-}
-
-/// The all / unread / favorites / archive view tabs (canonical `?view=` links).
-fn render_tabs(active: Filter) -> String {
-    [
-        (Filter::All, "All"),
-        (Filter::Unread, "Unread"),
-        (Filter::Favorites, "Favorites"),
-        (Filter::Archived, "Archive"),
-    ]
-    .iter()
-    .map(|(f, label)| {
-        let cls = if *f == active {
-            "magpie-tab magpie-tab--active"
-        } else {
-            "magpie-tab"
-        };
-        format!(
-            "<a class=\"{cls}\" href=\"/?view={f}\">{label}</a>",
-            f = f.as_str(),
-            label = label,
-        )
-    })
-    .collect::<Vec<_>>()
-    .join("")
+        .replace("{{LIST}}", &render_list(clips, csrf, query));
+    let rail = format!(
+        "<section class=\"card mg-railsave\">\
+          <div class=\"card__head\"><span class=\"mg-railsave__ico\" aria-hidden=\"true\">{icon}</span><h2>Save a link</h2></div>\
+          <div class=\"card__body\">\
+            <form method=\"post\" action=\"/clip\" class=\"save-form\">\
+              <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+              <div class=\"field\">\
+                <label for=\"url\">Page URL</label>\
+                <input type=\"url\" id=\"url\" name=\"url\" inputmode=\"url\" autocomplete=\"off\"\
+                       placeholder=\"https://example.com/article\" required>\
+              </div>\
+              <div class=\"field\">\
+                <label for=\"tags\">Tags <span class=\"field-hint\">(optional, comma-separated)</span></label>\
+                <input type=\"text\" id=\"tags\" name=\"tags\" autocomplete=\"off\"\
+                       placeholder=\"rust, reading, later\">\
+              </div>\
+              <div class=\"actions\">\
+                <button class=\"btn btn-primary\" type=\"submit\">Save to reading list</button>\
+              </div>\
+            </form>\
+          </div>\
+        </section>\
+        <section class=\"card\">\
+          <div class=\"card__head\"><h2>One-click bookmarklet</h2></div>\
+          <div class=\"card__body\">\
+            <p class=\"hint\">Drag this button to your bookmarks bar. Click it on any page to save it to HOLDFAST.</p>\
+            <p class=\"bookmarklet-wrap\">\
+              <a class=\"btn btn-secondary bookmarklet\" href=\"{bookmarklet}\"\
+                 onclick=\"return false;\" draggable=\"true\">Save to HOLDFAST</a>\
+            </p>\
+            <p class=\"hint hint--muted\">It opens a small tab that saves the current page through your single sign-on session.</p>\
+          </div>\
+        </section>",
+        icon = ICON_BOOKMARK,
+        csrf = esc(csrf),
+        bookmarklet = esc(&bookmarklet_href(&state.config.public_base_url)),
+    );
+    page_shell(
+        "Reading list · Magpie · HOLDFAST",
+        "Reading list",
+        Some(&who.email),
+        Some(query.filter.as_str()),
+        true,
+        Shell::Default,
+        &main,
+        Some(&rail),
+    )
 }
 
 fn render_views_bar(
@@ -1499,19 +1525,19 @@ fn render_views_bar(
     csrf: &str,
     view_error: &str,
 ) -> String {
-    let mut out = String::new();
+    let mut saved = String::new();
 
     if view_error == "limit" {
-        out.push_str(
+        saved.push_str(
             "<div class=\"saved-views__notice\" role=\"status\">Saved view limit reached. Delete a view before adding another.</div>",
         );
     }
 
     if !views.is_empty() {
-        out.push_str("<div class=\"saved-views__pins\">");
+        saved.push_str("<div class=\"saved-views__pins\">");
         for view in views {
             let href = index_location(&view.query);
-            out.push_str(&format!(
+            saved.push_str(&format!(
                 "<span class=\"saved-view\"><a class=\"saved-view__link\" href=\"{href}\">{name}</a>\
                    <form class=\"saved-view__del\" method=\"post\" action=\"/views/{id}/delete\">\
                      <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
@@ -1523,7 +1549,7 @@ fn render_views_bar(
                 csrf = esc(csrf),
             ));
         }
-        out.push_str("</div>");
+        saved.push_str("</div>");
     }
 
     let mut chips = String::new();
@@ -1547,12 +1573,14 @@ fn render_views_bar(
             href = esc(&href),
         ));
     }
-    if !chips.is_empty() {
-        out.push_str(&format!("<div class=\"filter-chips\">{chips}</div>"));
-    }
+    let chips = if chips.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"filter-chips\">{chips}</div>")
+    };
 
-    if !query.is_default() {
-        out.push_str(&format!(
+    let form = if !query.is_default() {
+        format!(
             "<form class=\"save-view-form\" method=\"post\" action=\"/views\">\
                <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
                <input type=\"hidden\" name=\"view\" value=\"{view}\">\
@@ -1565,10 +1593,17 @@ fn render_views_bar(
             view = esc(query.filter.as_str()),
             tag = esc(query.tag.as_deref().unwrap_or("")),
             site = esc(query.site.as_deref().unwrap_or("")),
-        ));
-    }
+        )
+    } else {
+        String::new()
+    };
 
-    out
+    let saved_block = format!("<div class=\"saved-views\" data-saved-views>{saved}</div>");
+    if saved.is_empty() && chips.is_empty() && form.is_empty() {
+        saved_block
+    } else {
+        format!("<div class=\"mg-refinebar\">{saved_block}{chips}{form}</div>")
+    }
 }
 
 /// The list toolbar: the bulk-action form (whose submit buttons act on the checkboxes rendered in
@@ -1608,7 +1643,7 @@ fn render_toolbar(csrf: &str, view: &str, auto_archive: bool) -> String {
            function cookie(n){{var p=document.cookie?document.cookie.split('; '):[];for(var i=0;i<p.length;i++){{var e=p[i].indexOf('=');if(e>-1&&p[i].slice(0,e)===n)return decodeURIComponent(p[i].slice(e+1));}}return '';}}\
            var CSRF=cookie('__Host-csrf');\
            var host=document.querySelector('[data-toast-host]');\
-           function toast(msg,ok){{if(!host)return;var t=document.createElement('div');t.className='toast '+(ok?'toast--ok':'toast--err');t.setAttribute('role','status');t.textContent=msg;host.appendChild(t);setTimeout(function(){{t.classList.add('is-leaving');setTimeout(function(){{if(t.parentNode)t.parentNode.removeChild(t);}},200);}},2400);}}\
+           function toast(msg,ok,href){{if(!host)return;var t=document.createElement('div');t.className='toast '+(ok?'toast--ok':'toast--err');t.setAttribute('role','status');t.textContent=msg;if(href){{var a=document.createElement('a');a.className='mg-toast-read';a.href=href;a.textContent='Read now';t.appendChild(a);}}host.appendChild(t);setTimeout(function(){{t.classList.add('is-leaving');setTimeout(function(){{if(t.parentNode)t.parentNode.removeChild(t);}},200);}},2400);}}\
            function post(url,params){{var b=Object.keys(params).map(function(k){{return encodeURIComponent(k)+'='+encodeURIComponent(params[k]);}}).join('&');return fetch(url,{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'}},body:b}}).then(function(r){{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}});}}\
            /* --- bulk-select count + sticky + disabled state --- */\
            var all=document.getElementById('bulkSelectAll');\
@@ -1624,6 +1659,12 @@ fn render_toolbar(csrf: &str, view: &str, auto_archive: bool) -> String {
            if(all)all.addEventListener('change',function(){{checks().forEach(function(c){{c.checked=all.checked;}});sync();}});\
            document.addEventListener('change',function(e){{if(e.target&&e.target.classList&&e.target.classList.contains('bulk-check'))sync();}});\
            sync();\
+           /* --- display density + bookmarklet save bridge --- */\
+           var list=document.querySelector('.clip-list');var densityBtns=Array.prototype.slice.call(document.querySelectorAll('[data-density]'));\
+           function setDensity(mode){{mode=mode==='compact'?'compact':'comfortable';try{{localStorage.setItem('magpie:density',mode);}}catch(e){{}}if(list)list.classList.toggle('clip-list--compact',mode==='compact');densityBtns.forEach(function(b){{b.classList.toggle('is-active',b.getAttribute('data-density')===mode);}});}}\
+           var savedMode='comfortable';try{{savedMode=localStorage.getItem('magpie:density')||'comfortable';}}catch(e){{}}setDensity(savedMode);\
+           densityBtns.forEach(function(b){{b.addEventListener('click',function(){{setDensity(b.getAttribute('data-density'));}});}});\
+           try{{var saved=sessionStorage.getItem('magpie:saved');if(saved){{sessionStorage.removeItem('magpie:saved');var first=document.querySelector('.clip-title');toast('Saved to your reading list',true,first?first.getAttribute('href'):null);}}}}catch(e){{}}\
            /* --- optimistic per-card favorite / archive --- */\
            var VIEW='{view}';\
            function idOf(form){{var m=(form.getAttribute('action')||'').match(/\\/(favorite|archive)\\/([^\\/]+)$/);return m?decodeURIComponent(m[2]):'';}}\
@@ -1669,11 +1710,21 @@ fn render_list(clips: &[Clip], csrf: &str, query: &ClipQuery) -> String {
                 Filter::Archived => "No archived clips yet.",
             },
         };
-        return format!("<li class=\"clip-item clip-item--empty\">{}</li>", esc(msg));
+        return format!(
+            "<li class=\"clip-item clip-item--empty\"><div class=\"empty\"><div class=\"empty__ico\" aria-hidden=\"true\">{icon}</div><h3>{headline}</h3><p>{msg}</p></div></li>",
+            icon = ICON_BOOKMARK,
+            headline = match query.filter {
+                Filter::All => "No clips",
+                Filter::Unread => "All caught up",
+                Filter::Favorites => "No favorites",
+                Filter::Archived => "No archived clips",
+            },
+            msg = esc(msg),
+        );
     }
     clips
         .iter()
-        .map(|c| render_clip_item(c, csrf, query.filter, true))
+        .map(|c| render_clip_item(c, csrf, query.filter, true, None))
         .collect::<Vec<_>>()
         .join("")
 }
@@ -1716,8 +1767,17 @@ fn url_encode(s: &str) -> String {
 
 /// Render one reading-list card. `selectable` adds the bulk-select checkbox (associated to
 /// `#bulkForm` by id) — the reading list sets it, the search results do not.
-fn render_clip_item(c: &Clip, csrf: &str, filter: Filter, selectable: bool) -> String {
+fn render_clip_item(
+    c: &Clip,
+    csrf: &str,
+    filter: Filter,
+    selectable: bool,
+    snippet: Option<&str>,
+) -> String {
     let title = display_title(c);
+    let initial = thumb_initial(c);
+    let tone = thumb_tone(&c.site);
+    let read_cls = if c.read { " clip-item--read" } else { "" };
     let read_badge = if c.read {
         "<span class=\"badge badge--read\">Read</span>"
     } else {
@@ -1745,6 +1805,10 @@ fn render_clip_item(c: &Clip, csrf: &str, filter: Filter, selectable: bool) -> S
     } else {
         format!("<p class=\"clip-excerpt\">{}</p>", esc(&c.excerpt))
     };
+    let excerpt = match snippet {
+        Some(s) => format!("<p class=\"mg-snippet\">{s}</p>"),
+        None => excerpt,
+    };
     let tags = render_tag_chips(&c.tags);
     let progress = render_card_progress(c);
     let archive_label = if c.archived { "Unarchive" } else { "Archive" };
@@ -1763,37 +1827,41 @@ fn render_clip_item(c: &Clip, csrf: &str, filter: Filter, selectable: bool) -> S
     };
 
     format!(
-        "<li class=\"clip-item\" data-clip-id=\"{id}\">\
+        "<li class=\"clip-item{read_cls}\" data-clip-id=\"{id}\">\
            {check}\
+           <span class=\"mg-thumb mg-thumb--t{tone}\" aria-hidden=\"true\">{initial}</span>\
            <div class=\"clip-main\">\
              <a class=\"clip-title\" href=\"/r/{id}\">{title}</a>\
              <div class=\"clip-meta\" data-clip-meta>{read_badge}{fav_badge}{site}{readtime}<span class=\"clip-time\">Saved {saved}</span></div>\
              {excerpt}\
              {progress}\
              {tags}\
-           </div>\
-           <div class=\"clip-actions\">\
-             <a class=\"btn btn-ghost btn-sm\" href=\"{url_attr}\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">Source</a>\
-             <form class=\"inline-form\" method=\"post\" action=\"/favorite/{id}\" data-fav-form>\
-               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
-               <input type=\"hidden\" name=\"view\" value=\"{view}\">\
-               <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{fav_label}</button>\
-             </form>\
-             <form class=\"inline-form\" method=\"post\" action=\"/archive/{id}\" data-archive-form>\
-               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
-               <input type=\"hidden\" name=\"view\" value=\"{view}\">\
-               <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{archive_label}</button>\
-             </form>\
-             <form class=\"inline-form\" method=\"post\" action=\"/delete/{id}\" \
-                   onsubmit=\"return confirm('Delete this clip? This cannot be undone.');\">\
-               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
-               <input type=\"hidden\" name=\"view\" value=\"{view}\">\
-               <button class=\"btn btn-danger btn-sm\" type=\"submit\">Delete</button>\
-             </form>\
+             <div class=\"clip-actions\">\
+               <a class=\"btn btn-ghost btn-sm\" href=\"{url_attr}\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">Source</a>\
+               <form class=\"inline-form\" method=\"post\" action=\"/favorite/{id}\" data-fav-form>\
+                 <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"view\" value=\"{view}\">\
+                 <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{fav_label}</button>\
+               </form>\
+               <form class=\"inline-form\" method=\"post\" action=\"/archive/{id}\" data-archive-form>\
+                 <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"view\" value=\"{view}\">\
+                 <button class=\"btn btn-ghost btn-sm\" type=\"submit\">{archive_label}</button>\
+               </form>\
+               <form class=\"inline-form\" method=\"post\" action=\"/delete/{id}\" \
+                     onsubmit=\"return confirm('Delete this clip? This cannot be undone.');\">\
+                 <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"view\" value=\"{view}\">\
+                 <button class=\"btn btn-danger btn-sm\" type=\"submit\">Delete</button>\
+               </form>\
+             </div>\
            </div>\
          </li>",
         check = check,
+        read_cls = read_cls,
         id = esc(&c.id),
+        tone = tone,
+        initial = esc(&initial),
         title = esc(&title),
         read_badge = read_badge,
         fav_badge = fav_badge,
@@ -1835,19 +1903,27 @@ fn render_card_progress(c: &Clip) -> String {
 fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highlight]) -> String {
     let title = display_title(clip);
     let site = if clip.site.trim().is_empty() {
-        "Saved page".to_string()
+        "<span>Saved page</span>".to_string()
     } else {
-        clip.site.clone()
+        format!(
+            "<a class=\"mg-read__site\" href=\"/?site={href}\">{site}</a>",
+            href = url_encode(&clip.site),
+            site = esc(&clip.site),
+        )
     };
-    let read_state = if clip.read { "Read" } else { "Unread" };
+    let read_state = if clip.read {
+        "<span class=\"pill pill--muted\">Read</span>"
+    } else {
+        "<span class=\"pill mg-pill--unread\">Unread</span>"
+    };
     let minutes = reading_minutes(word_count(&clip.content_text));
     let readtime = if minutes > 0 {
-        format!(" · {minutes} min read")
+        format!("<span class=\"mg-read__readtime\">{minutes} min read</span>")
     } else {
         String::new()
     };
     let meta = format!(
-        "{site} · Saved {saved}{readtime} · {read_state}",
+        "{site}<span>Saved {saved}</span>{readtime}{read_state}",
         saved = fmt_ts(clip.saved_at),
     );
 
@@ -1889,12 +1965,9 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
         csrf = esc(csrf),
     );
 
-    READER_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("Reader", Some(&who.email)))
+    let main = READER_HTML
         .replace("{{TITLE}}", &esc(&title))
-        .replace("{{META}}", &esc(&meta))
+        .replace("{{META}}", &meta)
         .replace("{{URL_ATTR}}", &esc(&clip.url))
         .replace("{{URL_TEXT}}", &esc(&clip.url))
         .replace("{{FAVORITE}}", &favorite_form)
@@ -1906,7 +1979,17 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
             "{{HIGHLIGHTS}}",
             &render_highlights_margin(clip, csrf, highlights),
         )
-        .replace("{{PROGRESS}}", &render_reader_progress(clip, csrf))
+        .replace("{{PROGRESS}}", &render_reader_progress(clip, csrf));
+    page_shell(
+        &format!("{title} · Magpie · HOLDFAST"),
+        "Reader",
+        Some(&who.email),
+        None,
+        false,
+        Shell::Reader,
+        &main,
+        None,
+    )
 }
 
 /// The reader's progress plumbing: a data holder carrying the clip id, CSRF token and saved percent
@@ -1920,18 +2003,24 @@ fn render_reader_progress(clip: &Clip, csrf: &str) -> String {
          (function(){{\
            var el=document.getElementById('readerProgress');if(!el)return;\
            var id=el.dataset.id,csrf=el.dataset.csrf;\
+           var fill=document.getElementById('readerBarFill');var paintPending=false;\
            var start=parseInt(el.dataset.progress,10)||0;var last=start;var pending=false;\
            function docPct(){{var h=document.documentElement.scrollHeight-window.innerHeight;\
              if(h<=0)return 0;var p=Math.round(window.scrollY/h*100);return p<0?0:(p>100?100:p);}}\
+           function paint(){{paintPending=false;if(fill)fill.style.width=docPct()+'%';}}\
+           function schedulePaint(){{if(paintPending)return;paintPending=true;requestAnimationFrame(paint);}}\
+           if(fill)fill.style.width=start+'%';\
            if(start>0&&start<100){{window.addEventListener('load',function(){{\
              var h=document.documentElement.scrollHeight-window.innerHeight;\
-             if(h>0)window.scrollTo(0,Math.round(h*start/100));}});}}\
+             if(h>0)window.scrollTo(0,Math.round(h*start/100));schedulePaint();}});}}\
            function report(){{pending=false;var p=docPct();if(Math.abs(p-last)<2)return;last=p;\
              var body='csrf_token='+encodeURIComponent(csrf)+'&progress='+p;\
              fetch('/progress/'+encodeURIComponent(id),{{method:'POST',credentials:'same-origin',\
                keepalive:true,headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:body}});}}\
            window.addEventListener('scroll',function(){{if(pending)return;pending=true;\
              setTimeout(report,1500);}},{{passive:true}});\
+           window.addEventListener('scroll',schedulePaint,{{passive:true}});\
+           window.addEventListener('load',schedulePaint);\
          }})();\
          </script>",
         id = esc(&clip.id),
@@ -1944,7 +2033,7 @@ fn render_reader_progress(clip: &Clip, csrf: &str) -> String {
 /// the clip's existing highlights, each with a delete button. All stored text is escaped.
 fn render_highlights_margin(clip: &Clip, csrf: &str, highlights: &[Highlight]) -> String {
     let add_form = format!(
-        "<form class=\"highlight-form\" method=\"post\" action=\"/r/{id}/highlight\">\
+        "<form class=\"highlight-form mg-hlform\" method=\"post\" action=\"/r/{id}/highlight\">\
            <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
            <label class=\"field\">\
              <span class=\"field-label\">Highlight a passage</span>\
@@ -1956,6 +2045,7 @@ fn render_highlights_margin(clip: &Clip, csrf: &str, highlights: &[Highlight]) -
              <textarea class=\"highlight-note\" name=\"note\" rows=\"2\" \
                        placeholder=\"Add a thought…\"></textarea>\
            </label>\
+           <span class=\"mg-hlform__hint\">Passage captured — add a note?</span>\
            <div class=\"actions\">\
              <button class=\"btn btn-primary btn-sm\" type=\"submit\">Add highlight</button>\
            </div>\
@@ -1977,15 +2067,30 @@ fn render_highlights_margin(clip: &Clip, csrf: &str, highlights: &[Highlight]) -
     };
 
     format!(
-        "<aside class=\"reader-margin\">\
+        "<aside class=\"reader-margin mg-rail\">\
            <div class=\"card\">\
-             <div class=\"card__head\"><h2>Highlights</h2></div>\
+             <div class=\"card__head\"><h2>Highlights</h2><span class=\"pill\">{count}</span></div>\
              <div class=\"card__body\">{add_form}</div>\
            </div>\
            <ul class=\"highlight-list\">{list}</ul>\
+           <button class=\"mg-hlchip\" type=\"button\" hidden>Highlight</button>\
+           <script>\
+           (function(){{\
+             var prose=document.querySelector('.mg-prose');var form=document.querySelector('.mg-hlform');var chip=document.querySelector('.mg-hlchip');\
+             if(!prose||!form||!chip)return;var quote=form.querySelector('textarea[name=quote]');var note=form.querySelector('textarea[name=note]');\
+             function inProse(sel){{return sel&&sel.anchorNode&&sel.focusNode&&prose.contains(sel.anchorNode)&&prose.contains(sel.focusNode);}}\
+             function arm(){{var sel=window.getSelection();if(!inProse(sel)||sel.isCollapsed)return;var text=sel.toString().trim();if(!text)return;\
+               if(quote)quote.value=text;form.classList.add('is-armed');var r=sel.getRangeAt(0).getBoundingClientRect();\
+               chip.style.left=Math.max(12,Math.min(window.innerWidth-120,r.left))+'px';chip.style.top=Math.max(12,r.top+window.scrollY-42)+'px';chip.hidden=false;}}\
+             document.addEventListener('mouseup',function(){{setTimeout(arm,0);}});\
+             document.addEventListener('selectionchange',function(){{if(window.getSelection()&&window.getSelection().isCollapsed)chip.hidden=true;}});\
+             chip.addEventListener('click',function(){{form.scrollIntoView({{block:'center'}});if(note)note.focus();chip.hidden=true;}});\
+           }})();\
+           </script>\
          </aside>",
         add_form = add_form,
         list = list,
+        count = highlights.len(),
     )
 }
 
@@ -2014,12 +2119,14 @@ fn render_highlight_item(h: &Highlight, csrf: &str, on_list: bool) -> String {
            {note}\
            <div class=\"highlight-meta\">\
              <span class=\"highlight-time\">Highlighted {when}</span>\
-             {open}\
-             <form class=\"inline-form\" method=\"post\" action=\"/highlight/{hid}/delete\">\
-               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
-               <input type=\"hidden\" name=\"from\" value=\"{from}\">\
-               <button class=\"btn btn-danger btn-sm\" type=\"submit\">Delete</button>\
-             </form>\
+             <div class=\"mg-hl__actions\">\
+               {open}\
+               <form class=\"inline-form\" method=\"post\" action=\"/highlight/{hid}/delete\">\
+                 <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"from\" value=\"{from}\">\
+                 <button class=\"btn btn-subtle btn-sm mg-hl__del\" type=\"submit\">Delete</button>\
+               </form>\
+             </div>\
            </div>\
          </li>",
         quote = esc(&h.quote),
@@ -2040,46 +2147,114 @@ async fn render_highlights_page(
     items: &[Highlight],
 ) -> String {
     let body = if items.is_empty() {
-        "<ul class=\"highlight-list\"><li class=\"highlight-item highlight-item--empty\">You have \
-         not highlighted anything yet. Open a clip and highlight a passage to see it here.</li></ul>"
+        format!(
+            "<div class=\"empty\"><div class=\"empty__ico\" aria-hidden=\"true\">{icon}</div><h2>Your commonplace book is empty</h2><p>You have not highlighted anything yet. Open a clip and highlight a passage to see it here.</p><a class=\"btn btn-primary\" href=\"/\">Reading list</a></div>",
+            icon = ICON_HIGHLIGHT,
+        )
             .to_string()
     } else {
-        // Group consecutive highlights by clip (the list is already ordered newest-first, so a
-        // clip's highlights stay together). Fetch each clip's title once for the group header.
-        let mut out = String::new();
-        let mut current_clip: Option<String> = None;
+        let mut groups: Vec<(String, Vec<&Highlight>)> = Vec::new();
         for h in items {
-            if current_clip.as_deref() != Some(h.clip_id.as_str()) {
-                if current_clip.is_some() {
-                    out.push_str("</ul></section>");
-                }
-                let title = match state.store.get(&h.clip_id).await {
-                    Ok(Some(c)) if c.owner_sub == who.subject => display_title(&c),
-                    _ => "Saved clip".to_string(),
-                };
-                out.push_str(&format!(
-                    "<section class=\"highlight-group\">\
-                       <h2 class=\"highlight-group__title\">\
-                         <a href=\"/r/{id}\">{title}</a>\
-                       </h2><ul class=\"highlight-list\">",
-                    id = esc(&h.clip_id),
-                    title = esc(&title),
-                ));
-                current_clip = Some(h.clip_id.clone());
+            if let Some((_, bucket)) = groups.iter_mut().find(|(id, _)| id == &h.clip_id) {
+                bucket.push(h);
+            } else {
+                groups.push((h.clip_id.clone(), vec![h]));
             }
-            out.push_str(&render_highlight_item(h, csrf, true));
         }
-        if current_clip.is_some() {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "<p class=\"mg-hl-stats\"><b>{}</b> highlights across <b>{}</b> articles</p>",
+            items.len(),
+            groups.len(),
+        ));
+        for (clip_id, hs) in groups {
+            let (title, tile, meta, tile_cls) = match state.store.get(&clip_id).await {
+                Ok(Some(c)) if c.owner_sub == who.subject => {
+                    let title = display_title(&c);
+                    let saved = fmt_ts(c.saved_at);
+                    let date = saved.get(..10).unwrap_or(&saved);
+                    let minutes = reading_minutes(word_count(&c.content_text));
+                    let readtime = if minutes > 0 {
+                        format!(" · {minutes} min read")
+                    } else {
+                        String::new()
+                    };
+                    let site = if c.site.trim().is_empty() {
+                        "Saved page".to_string()
+                    } else {
+                        c.site.clone()
+                    };
+                    (
+                        title,
+                        thumb_initial(&c),
+                        format!(
+                            "{} · Saved {} · {} {}{}",
+                            esc(&site),
+                            esc(date),
+                            hs.len(),
+                            if hs.len() == 1 {
+                                "highlight"
+                            } else {
+                                "highlights"
+                            },
+                            readtime,
+                        ),
+                        "",
+                    )
+                }
+                _ => (
+                    "Saved clip".to_string(),
+                    "S".to_string(),
+                    format!(
+                        "{} {}",
+                        hs.len(),
+                        if hs.len() == 1 {
+                            "highlight"
+                        } else {
+                            "highlights"
+                        },
+                    ),
+                    " mg-hlgroup__tile--fallback",
+                ),
+            };
+            out.push_str(&format!(
+                "<section class=\"highlight-group\">\
+                   <header class=\"mg-hlgroup__head\">\
+                     <span class=\"mg-hlgroup__tile{tile_cls}\" aria-hidden=\"true\">{tile}</span>\
+                     <div class=\"mg-hlgroup__id\">\
+                       <h2 class=\"highlight-group__title\"><a href=\"/r/{id}\">{title}</a></h2>\
+                       <p class=\"mg-hlgroup__meta\">{meta}</p>\
+                     </div>\
+                     <a class=\"btn btn-ghost btn-sm mg-hlgroup__open\" href=\"/r/{id}\">Open reader</a>\
+                   </header>\
+                   <ul class=\"highlight-list\">",
+                id = esc(&clip_id),
+                title = esc(&title),
+                tile = esc(&tile),
+                tile_cls = tile_cls,
+                meta = meta,
+            ));
+            for h in hs {
+                out.push_str(&render_highlight_item(h, csrf, true));
+            }
             out.push_str("</ul></section>");
         }
         out
     };
 
-    HIGHLIGHTS_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("Highlights", Some(&who.email)))
-        .replace("{{BODY}}", &body)
+    let main = HIGHLIGHTS_HTML
+        .replace("{{ICON_HIGHLIGHT}}", ICON_HIGHLIGHT)
+        .replace("{{BODY}}", &body);
+    page_shell(
+        "Highlights · Magpie · HOLDFAST",
+        "Highlights",
+        Some(&who.email),
+        Some("highlights"),
+        false,
+        Shell::Solo,
+        &main,
+        None,
+    )
 }
 
 fn render_sites(who: &Identity, sites: &[(String, usize)]) -> String {
@@ -2087,14 +2262,28 @@ fn render_sites(who: &Identity, sites: &[(String, usize)]) -> String {
         "<ul class=\"source-list\"><li class=\"source-row source-row--empty\">No sources yet.</li></ul>"
             .to_string()
     } else {
+        let max = sites
+            .iter()
+            .map(|(_, count)| *count)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let rows = sites
             .iter()
             .map(|(site, count)| {
+                let initial = site
+                    .chars()
+                    .find(|c| !c.is_whitespace())
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_else(|| "S".to_string());
+                let pct = (*count * 100) / max;
                 format!(
-                    "<li class=\"source-row\"><a class=\"source-row__link\" href=\"/?site={href}\">{site}</a><span class=\"source-row__count badge\">{count}</span></li>",
+                    "<li class=\"source-row\"><span class=\"mg-source__glyph\" aria-hidden=\"true\">{initial}</span><a class=\"source-row__link\" href=\"/?site={href}\">{site}</a><span class=\"source-row__count badge\">{count}</span><span class=\"mg-source__bar\" aria-hidden=\"true\"><i style=\"--w:{pct}%\"></i></span></li>",
+                    initial = esc(&initial),
                     href = url_encode(site),
                     site = esc(site),
                     count = count,
+                    pct = pct,
                 )
             })
             .collect::<Vec<_>>()
@@ -2102,11 +2291,19 @@ fn render_sites(who: &Identity, sites: &[(String, usize)]) -> String {
         format!("<ul class=\"source-list\">{rows}</ul>")
     };
 
-    SITES_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("Sources", Some(&who.email)))
-        .replace("{{BODY}}", &body)
+    let main = SITES_HTML
+        .replace("{{ICON_GLOBE}}", ICON_GLOBE)
+        .replace("{{BODY}}", &body);
+    page_shell(
+        "Sources · Magpie · HOLDFAST",
+        "Sources",
+        Some(&who.email),
+        Some("sites"),
+        false,
+        Shell::Solo,
+        &main,
+        None,
+    )
 }
 
 /// The reader's tags row: the current tag chips plus an inline edit form (comma-separated). The
@@ -2115,15 +2312,17 @@ fn render_tags_editor(clip: &Clip, csrf: &str) -> String {
     let chips = render_tag_chips(&clip.tags);
     let current = clip.tags.as_deref().unwrap_or("");
     format!(
-        "<div class=\"reader-tags\">\
-           {chips}\
-           <form class=\"tags-form\" method=\"post\" action=\"/tags/{id}\">\
-             <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
-             <input class=\"tags-input\" type=\"text\" name=\"tags\" value=\"{value}\" \
-                    placeholder=\"tags, comma, separated\" autocomplete=\"off\">\
-             <button class=\"btn btn-ghost btn-sm\" type=\"submit\">Save tags</button>\
-           </form>\
-         </div>",
+        "<details class=\"mg-tagedit\"><summary>Edit tags</summary>\
+           <div class=\"reader-tags\">\
+             {chips}\
+             <form class=\"tags-form\" method=\"post\" action=\"/tags/{id}\">\
+               <input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\">\
+               <input class=\"tags-input\" type=\"text\" name=\"tags\" value=\"{value}\" \
+                      placeholder=\"tags, comma, separated\" autocomplete=\"off\">\
+               <button class=\"btn btn-ghost btn-sm\" type=\"submit\">Save tags</button>\
+             </form>\
+           </div>\
+         </details>",
         chips = chips,
         id = esc(&clip.id),
         csrf = esc(csrf),
@@ -2141,18 +2340,23 @@ fn render_search(
     limit: usize,
 ) -> String {
     let list = if query.is_empty() {
-        "<li class=\"clip-item clip-item--empty\">Type a word or phrase to search your saved \
-         clips.</li>"
-            .to_string()
+        format!(
+            "<li class=\"clip-item clip-item--empty\"><div class=\"empty\"><div class=\"empty__ico\" aria-hidden=\"true\">{icon}</div><h3>Search your library</h3><p>Type a word or phrase to search your saved clips.</p></div></li>",
+            icon = ICON_SEARCH,
+        )
     } else if results.is_empty() {
         format!(
-            "<li class=\"clip-item clip-item--empty\">No clips match \u{201c}{}\u{201d}.</li>",
-            esc(query)
+            "<li class=\"clip-item clip-item--empty\"><div class=\"empty\"><div class=\"empty__ico\" aria-hidden=\"true\">{icon}</div><h3>No results</h3><p>No clips match \u{201c}{query}\u{201d}.</p></div></li>",
+            icon = ICON_SEARCH,
+            query = esc(query),
         )
     } else {
         results
             .iter()
-            .map(|c| render_clip_item(c, csrf, Filter::All, false))
+            .map(|c| {
+                let snippet = matched_snippet(c, query);
+                render_clip_item(c, csrf, Filter::All, false, snippet.as_deref())
+            })
             .collect::<Vec<_>>()
             .join("")
     };
@@ -2174,13 +2378,37 @@ fn render_search(
         _ => String::new(),
     };
 
-    SEARCH_HTML
-        .replace("{{CSS}}", app_css())
-        .replace("{{SHIELD}}", SHIELD_SVG)
-        .replace("{{USERBOX}}", &userbox("Search", Some(&who.email)))
+    let result_meta = if query.is_empty() {
+        String::new()
+    } else if results.len() == limit && !results.is_empty() {
+        format!(
+            "<p class=\"mg-resultmeta\">Showing first <b>{}</b> — load more below</p>",
+            results.len()
+        )
+    } else {
+        format!(
+            "<p class=\"mg-resultmeta\"><b>{}</b> results for \u{201c}{}\u{201d}</p>",
+            results.len(),
+            esc(query),
+        )
+    };
+
+    let main = SEARCH_HTML
+        .replace("{{ICON_SEARCH}}", ICON_SEARCH)
         .replace("{{QUERY_ATTR}}", &esc(query))
+        .replace("{{RESULTMETA}}", &result_meta)
         .replace("{{LIST}}", &list)
-        .replace("{{MORE}}", &more)
+        .replace("{{MORE}}", &more);
+    page_shell(
+        "Search · Magpie · HOLDFAST",
+        "Search",
+        Some(&who.email),
+        None,
+        false,
+        Shell::Solo,
+        &main,
+        None,
+    )
 }
 
 /// Render the stored plain-text content as escaped paragraphs (one per source line). The remote
@@ -2200,6 +2428,55 @@ fn render_content(content_text: &str) -> String {
     paragraphs.join("")
 }
 
+fn matched_snippet(c: &Clip, query: &str) -> Option<String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    snippet_window(&c.title, q).or_else(|| snippet_window(&c.content_text, q))
+}
+
+fn snippet_window(text: &str, query: &str) -> Option<String> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let needle = query.to_lowercase();
+    let pos = lower.find(&needle)?;
+    let mut hit_start = pos.min(text.len());
+    while hit_start > 0 && !text.is_char_boundary(hit_start) {
+        hit_start -= 1;
+    }
+    let mut hit_end = (pos + query.len()).min(text.len());
+    while hit_end < text.len() && !text.is_char_boundary(hit_end) {
+        hit_end += 1;
+    }
+    if hit_end < hit_start {
+        return None;
+    }
+    let prefix_start = text[..hit_start]
+        .char_indices()
+        .rev()
+        .nth(119)
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    let suffix_end = text[hit_end..]
+        .char_indices()
+        .nth(120)
+        .map(|(idx, _)| hit_end + idx)
+        .unwrap_or(text.len());
+    let prefix_ellipsis = if prefix_start > 0 { "…" } else { "" };
+    let suffix_ellipsis = if suffix_end < text.len() { "…" } else { "" };
+    Some(format!(
+        "{}{}<mark class=\"mg-hit\">{}</mark>{}{}",
+        prefix_ellipsis,
+        esc(&text[prefix_start..hit_start]),
+        esc(&text[hit_start..hit_end]),
+        esc(&text[hit_end..suffix_end]),
+        suffix_ellipsis,
+    ))
+}
+
 /// The display title, falling back to "Untitled" when the page exposed none.
 fn display_title(c: &Clip) -> String {
     if c.title.trim().is_empty() {
@@ -2207,4 +2484,18 @@ fn display_title(c: &Clip) -> String {
     } else {
         c.title.clone()
     }
+}
+
+fn thumb_initial(c: &Clip) -> String {
+    c.site
+        .trim()
+        .chars()
+        .find(|ch| !ch.is_whitespace())
+        .or_else(|| c.title.trim().chars().find(|ch| !ch.is_whitespace()))
+        .map(|ch| ch.to_uppercase().to_string())
+        .unwrap_or_else(|| "•".to_string())
+}
+
+fn thumb_tone(site: &str) -> usize {
+    site.bytes().map(usize::from).sum::<usize>() % 5 + 1
 }

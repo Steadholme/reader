@@ -1,38 +1,23 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Search · Magpie · HOLDFAST</title>
-  <style>{{CSS}}</style>
-</head>
-<body class="page-console">
-  <header class="appbar">
-    <a class="appbar__brand" href="/" aria-label="HOLDFAST Clips">
-      <span class="app-tile" style="--app:#db2777;--app-soft:#fdf0f6" aria-hidden="true">{{SHIELD}}</span>
-      <span class="appbar__name"><b>Clips</b><span>clip.w33d.xyz</span></span>
-    </a>
-    {{USERBOX}}
-  </header>
+<div class="console__head mg-pagehead">
+  <span class="mg-pagehead__glyph" aria-hidden="true">{{ICON_SEARCH}}</span>
+  <div>
+    <h1 class="mg-pagehead__title">Search</h1>
+    <p class="sub mg-pagehead__sub">Find saved clips by title or readable text.</p>
+  </div>
+</div>
 
-  <main class="console">
-    <div class="console__head console__head--row">
-      <a class="btn btn-ghost btn-sm" href="/">&larr; Reading list</a>
-      <h1>Search</h1>
-    </div>
-
-    <section class="reading">
-      <form class="search-bar" method="get" action="/search" role="search">
-        <input class="search-input" type="search" name="q" value="{{QUERY_ATTR}}" inputmode="search"
-               autocomplete="off" placeholder="Search your clips…" aria-label="Search your clips" autofocus>
-        <button class="btn btn-secondary btn-sm" type="submit">Search</button>
-      </form>
-      <ul class="clip-list">
-        {{LIST}}
-      </ul>
-      {{MORE}}
-    </section>
-  </main>
-</body>
-</html>
+<section class="reading">
+  <form class="search-bar mg-search" method="get" action="/search" role="search">
+    <label class="mg-search__field">
+      <span class="mg-search__ico" aria-hidden="true">{{ICON_SEARCH}}</span>
+      <input class="search-input" type="search" name="q" value="{{QUERY_ATTR}}" inputmode="search"
+             autocomplete="off" placeholder="Search your clips…" aria-label="Search your clips" autofocus>
+    </label>
+    <button class="btn btn-primary btn-sm" type="submit">Search</button>
+  </form>
+  {{RESULTMETA}}
+  <ul class="clip-list">
+    {{LIST}}
+  </ul>
+  {{MORE}}
+</section>
