@@ -15,7 +15,7 @@ pub mod health;
 pub mod reader;
 pub mod river;
 
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, Response};
 use std::sync::OnceLock;
 
@@ -57,6 +57,13 @@ pub const LOGOUT_URL: &str = "https://sso.w33d.xyz/_gw/auth/logout";
 /// Branded error page shell.
 const ERROR_HTML: &str = include_str!("../../templates/error.html");
 
+/// Resolve the display theme (`"light"`/`"dark"`/`"auto"`) from the request's `Cookie:` header.
+/// This is a DISPLAY preference only — carried by the gateway-owned `__Secure-theme` cookie that
+/// lives outside both gateway HMACs — so it is NEVER consulted for auth, CSRF, or identity.
+pub(crate) fn theme_of(headers: &HeaderMap) -> &'static str {
+    odyssey::resolve_theme(headers.get(header::COOKIE).and_then(|v| v.to_str().ok()))
+}
+
 /// Shared Current page chrome: document head, azure app-bar, optional section tabs, and shell width.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn page_shell(
@@ -66,6 +73,7 @@ pub(crate) fn page_shell(
     count_pill: &str,
     shell_cls: &str,
     email: Option<&str>,
+    theme: &str,
     main_inner: &str,
     after_main: &str,
 ) -> String {
@@ -75,11 +83,11 @@ pub(crate) fn page_shell(
     format!(
         concat!(
             "<!DOCTYPE html>\n",
-            "<html lang=\"en\">\n",
+            "<html lang=\"en\"{theme_attr}>\n",
             "<head>\n",
             "  <meta charset=\"utf-8\">\n",
             "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
-            "  <meta name=\"color-scheme\" content=\"light\">\n",
+            "  <meta name=\"color-scheme\" content=\"{color_scheme}\">\n",
             "  <title>{title} · Current · HOLDFAST</title>\n",
             "  <style>{css}</style>\n",
             "</head>\n",
@@ -100,9 +108,11 @@ pub(crate) fn page_shell(
             "</html>"
         ),
         title = esc(head_title),
+        theme_attr = odyssey::html_theme_attr(theme),
+        color_scheme = odyssey::color_scheme_meta(theme),
         css = app_css(),
         shield = SHIELD_SVG,
-        userbox = userbox(active_nav, email),
+        userbox = userbox(active_nav, email, theme),
         shell_cls = shell_cls,
         sections = sections,
         main_inner = main_inner,
@@ -169,10 +179,11 @@ pub(crate) fn tile_tint(s: &str) -> usize {
 /// portal, and a CSS focus-within avatar menu (Account · All apps · Log out). `active`
 /// highlights the current section (`"river"` / `"feeds"`). The logout route/method are
 /// preserved exactly (a GET link to the gateway) as a danger menu item.
-pub fn userbox(active: &str, email: Option<&str>) -> String {
+pub fn userbox(active: &str, email: Option<&str>, theme: &str) -> String {
     let river_cls = if active == "river" { " is-active" } else { "" };
     let feeds_cls = if active == "feeds" { " is-active" } else { "" };
     let (initials, name, sub) = identity_bits(email.unwrap_or(""));
+    let themeswitch = themeswitch(theme);
     format!(
         concat!(
             "<nav class=\"appbar__nav\">",
@@ -181,6 +192,7 @@ pub fn userbox(active: &str, email: Option<&str>) -> String {
             "</nav>",
             "<span class=\"appbar__spacer\"></span>",
             "<div class=\"appbar__right\">",
+            "{themeswitch}",
             "<a class=\"iconbtn\" href=\"https://w33d.xyz\" title=\"All apps\" aria-label=\"All apps\">{icon_grid}</a>",
             "<div class=\"usermenu\">",
             "<button class=\"usermenu__btn\" type=\"button\" aria-haspopup=\"true\" aria-label=\"Account menu\">",
@@ -196,6 +208,7 @@ pub fn userbox(active: &str, email: Option<&str>) -> String {
         ),
         river_cls = river_cls,
         feeds_cls = feeds_cls,
+        themeswitch = themeswitch,
         icon_river = ICON_RIVER,
         icon_rss = SHIELD_SVG,
         icon_grid = ICON_GRID,
@@ -206,6 +219,36 @@ pub fn userbox(active: &str, email: Option<&str>) -> String {
         name = esc(&name),
         sub = esc(&sub),
         logout = LOGOUT_URL,
+    )
+}
+
+/// The app-bar three-state theme switcher (Light · Dark · System), a pure `<a href>` set that
+/// flips the gateway-owned `__Secure-theme` cookie via `/_gw/theme` — no JS, no service route. The
+/// `.themeswitch` / `.themeswitch__opt` styles ship in the vendored Odyssey APP_CSS. `active` is the
+/// resolved theme (`"light"`/`"dark"`/`"auto"`); the matching option gets `is-active` + `aria-current`.
+fn themeswitch(active: &str) -> String {
+    let on = |k: &str| if active == k { " is-active" } else { "" };
+    let cur = |k: &str| {
+        if active == k {
+            " aria-current=\"true\""
+        } else {
+            ""
+        }
+    };
+    format!(
+        concat!(
+            "<div class=\"themeswitch\" role=\"group\" aria-label=\"Theme\">\n",
+            "  <a class=\"themeswitch__opt{ls}\" href=\"/_gw/theme?to=light\" title=\"Light\" aria-label=\"Light\"{lc}><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"4\"/><path d=\"M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4\"/></svg></a>\n",
+            "  <a class=\"themeswitch__opt{ds}\" href=\"/_gw/theme?to=dark\" title=\"Dark\" aria-label=\"Dark\"{dc}><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12 3a6.5 6.5 0 0 0 9 9 9 9 0 1 1-9-9Z\"/></svg></a>\n",
+            "  <a class=\"themeswitch__opt{as_}\" href=\"/_gw/theme?to=auto\" title=\"System\" aria-label=\"System\"{ac}><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect x=\"2\" y=\"3\" width=\"20\" height=\"14\" rx=\"2\"/><path d=\"M8 21h8M12 17v4\"/></svg></a>\n",
+            "</div>",
+        ),
+        ls = on("light"),
+        lc = cur("light"),
+        ds = on("dark"),
+        dc = cur("dark"),
+        as_ = on("auto"),
+        ac = cur("auto"),
     )
 }
 
@@ -248,6 +291,7 @@ pub fn render_error(
         "",
         "",
         email,
+        "light",
         &main,
         "",
     );

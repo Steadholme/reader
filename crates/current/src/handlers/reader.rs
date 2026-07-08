@@ -17,7 +17,9 @@ use crate::auth;
 use crate::config::READER_SHORT_CONTENT_CHARS;
 use crate::error::AppError;
 use crate::feed::safe_link;
-use crate::handlers::{esc, fmt_rel, fmt_ts, html_with_csrf, page_shell, tile_initial, tile_tint};
+use crate::handlers::{
+    esc, fmt_rel, fmt_ts, html_with_csrf, page_shell, theme_of, tile_initial, tile_tint,
+};
 use crate::model::RiverEntry;
 use crate::{now_secs, AppState};
 
@@ -66,7 +68,8 @@ pub async fn read(
     let _ = state.store.mark_item_read(&id, &who.subject).await;
 
     let csrf = auth::new_csrf_token();
-    let html = render_reader(&entry, &paragraphs, source, &who.email, now_secs(), &csrf);
+    let theme = theme_of(&headers);
+    let html = render_reader(&entry, &paragraphs, source, &who.email, now_secs(), &csrf, theme);
     Ok(html_with_csrf(StatusCode::OK, html, &csrf))
 }
 
@@ -159,6 +162,7 @@ fn summary_paragraphs(summary: &str) -> Vec<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_reader(
     entry: &RiverEntry,
     paragraphs: &[String],
@@ -166,6 +170,7 @@ fn render_reader(
     email: &str,
     now: i64,
     csrf: &str,
+    theme: &str,
 ) -> String {
     let item = &entry.item;
     let title = if item.title.trim().is_empty() {
@@ -276,6 +281,7 @@ fn render_reader(
         "",
         " console--narrow",
         Some(email),
+        theme,
         &main,
         "",
     )

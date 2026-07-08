@@ -886,3 +886,21 @@
   opacity:.62;
   pointer-events:none;
 }
+
+/* ============ 暗色品牌:Current 天蓝提亮(value-only remap;light 字节不变)============
+   品牌 token(--brand*)定义在 .page-console(body 层),故暗色重映射必须同样落在
+   .page-console:`:root[data-theme="dark"]` 只命中 <html>,会被 body 上 .page-console 的
+   --brand 声明盖过,够不到子树。亮蓝承接 color:var(--surface) 白标签惯用法 —— btn-primary
+   的深表面标签在亮蓝底上 AA(约 7.7:1),--brand-ink 亮蓝在 --brand-soft 暗底上 AA(约 7.8:1)。 */
+:root[data-theme="dark"] .page-console {
+  --brand:#4db2f0;
+  --brand-soft:#0f2a40;
+  --brand-ink:#7cc4f5;
+}
+@media (prefers-color-scheme:dark) {
+  :root[data-theme="auto"] .page-console {
+    --brand:#4db2f0;
+    --brand-soft:#0f2a40;
+    --brand-ink:#7cc4f5;
+  }
+}

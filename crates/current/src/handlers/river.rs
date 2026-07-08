@@ -16,7 +16,7 @@ use crate::config::{RIVER_LIMIT, SUMMARY_SENTENCES};
 use crate::error::AppError;
 use crate::feed::safe_link;
 use crate::handlers::{
-    esc, fmt_rel, fmt_ts, html_with_csrf, page_shell, redirect_found, redirect_see_other,
+    esc, fmt_rel, fmt_ts, html_with_csrf, page_shell, redirect_found, redirect_see_other, theme_of,
     tile_initial, tile_tint,
 };
 use crate::model::RiverEntry;
@@ -77,7 +77,8 @@ pub async fn index(
         .river_filtered(&who.subject, filter, RIVER_LIMIT)
         .await?;
 
-    let html = render_river(&entries, &who.email, &csrf, now, filter);
+    let theme = theme_of(&headers);
+    let html = render_river(&entries, &who.email, &csrf, now, filter, theme);
     Ok(html_with_csrf(StatusCode::OK, html, &csrf))
 }
 
@@ -324,7 +325,14 @@ pub async fn api_mark_all(
 // Rendering
 // ---------------------------------------------------------------------------
 
-fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64, filter: &str) -> String {
+fn render_river(
+    entries: &[RiverEntry],
+    email: &str,
+    csrf: &str,
+    now: i64,
+    filter: &str,
+    theme: &str,
+) -> String {
     let count = entries.len();
     // The count pill reads for the active view.
     let noun = match filter {
@@ -401,6 +409,7 @@ fn render_river(entries: &[RiverEntry], email: &str, csrf: &str, now: i64, filte
         &count_pill,
         " console--narrow",
         Some(email),
+        theme,
         &main,
         RIVER_TAIL,
     )

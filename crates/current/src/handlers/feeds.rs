@@ -18,8 +18,8 @@ use crate::config::{MAX_FEEDS_PER_OWNER, MAX_URL_CHARS};
 use crate::error::AppError;
 use crate::feed::{fetch_and_store, new_feed_id, parse_opml_urls, safe_link};
 use crate::handlers::{
-    esc, fmt_rel, html_with_csrf, page_shell, redirect_see_other, tile_initial, tile_tint,
-    SHIELD_SVG,
+    esc, fmt_rel, html_with_csrf, page_shell, redirect_see_other, theme_of, tile_initial,
+    tile_tint, SHIELD_SVG,
 };
 use crate::model::{Category, Feed};
 use crate::{now_secs, random_alnum, AppState, FEED_ID_LEN};
@@ -42,7 +42,8 @@ pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<R
     let feeds = state.store.list_feeds(&who.subject).await?;
     let categories = state.store.list_categories(&who.subject).await?;
     let unread = state.store.feed_unread_counts(&who.subject).await?;
-    let html = render_feeds(&feeds, &categories, &unread, &who, &csrf, None);
+    let theme = theme_of(&headers);
+    let html = render_feeds(&feeds, &categories, &unread, &who, &csrf, None, theme);
     Ok(html_with_csrf(StatusCode::OK, html, &csrf))
 }
 
@@ -76,13 +77,14 @@ pub async fn add(
     // Normalize + validate the URL (http/https only, bounded length).
     let url = form.url.trim();
     if url.is_empty() || url.chars().count() > MAX_URL_CHARS {
-        return Ok(rerender(&state, &who, "Enter a feed URL (up to 2048 characters).").await);
+        return Ok(rerender(&state, &who, "Enter a feed URL (up to 2048 characters).", &headers).await);
     }
     let Some(url) = safe_link(url) else {
         return Ok(rerender(
             &state,
             &who,
             "Feed URL must start with http:// or https://.",
+            &headers,
         )
         .await);
     };
@@ -90,12 +92,12 @@ pub async fn add(
     // Friendly cap so the per-owner river join stays cheap.
     let existing = state.store.list_feeds(&who.subject).await?;
     if existing.len() >= MAX_FEEDS_PER_OWNER {
-        return Ok(rerender(&state, &who, "You've reached the maximum number of feeds.").await);
+        return Ok(rerender(&state, &who, "You've reached the maximum number of feeds.", &headers).await);
     }
 
     // Shared insert + best-effort initial fetch (the same path the OPML import reuses).
     if !subscribe(&state, &who.subject, url, now).await? {
-        return Ok(rerender(&state, &who, "You're already subscribed to that feed.").await);
+        return Ok(rerender(&state, &who, "You're already subscribed to that feed.", &headers).await);
     }
 
     Ok(redirect_see_other("/feeds"))
@@ -198,6 +200,7 @@ pub async fn create_category(
             &state,
             &who,
             "Enter a category name (up to 120 characters).",
+            &headers,
         )
         .await);
     }
@@ -207,6 +210,7 @@ pub async fn create_category(
             &state,
             &who,
             "You've reached the maximum number of categories.",
+            &headers,
         )
         .await);
     }
@@ -217,7 +221,7 @@ pub async fn create_category(
         position: existing.len() as i64,
     };
     if !state.store.add_category(&category).await? {
-        return Ok(rerender(&state, &who, "A category with that name already exists.").await);
+        return Ok(rerender(&state, &who, "A category with that name already exists.", &headers).await);
     }
     tracing::info!(
         owner = who.subject,
@@ -246,6 +250,7 @@ pub async fn rename_category(
             &state,
             &who,
             "Enter a category name (up to 120 characters).",
+            &headers,
         )
         .await);
     }
@@ -443,6 +448,7 @@ pub async fn import_opml(
             &state,
             &who,
             "No feeds found in that OPML. Paste the contents of an exported OPML file and try again.",
+            &headers,
         )
         .await);
     }
@@ -554,7 +560,12 @@ fn spawn_initial_fetch(state: AppState, feed: Feed) {
 }
 
 /// Re-render the feeds page with an inline error (a fresh CSRF token + the current list).
-async fn rerender(state: &AppState, who: &Identity, message: &str) -> Response {
+async fn rerender(
+    state: &AppState,
+    who: &Identity,
+    message: &str,
+    headers: &HeaderMap,
+) -> Response {
     let csrf = auth::new_csrf_token();
     let feeds = state
         .store
@@ -571,10 +582,12 @@ async fn rerender(state: &AppState, who: &Identity, message: &str) -> Response {
         .feed_unread_counts(&who.subject)
         .await
         .unwrap_or_default();
-    let html = render_feeds(&feeds, &categories, &unread, who, &csrf, Some(message));
+    let theme = theme_of(headers);
+    let html = render_feeds(&feeds, &categories, &unread, who, &csrf, Some(message), theme);
     html_with_csrf(StatusCode::BAD_REQUEST, html, &csrf)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_feeds(
     feeds: &[Feed],
     categories: &[Category],
@@ -582,6 +595,7 @@ fn render_feeds(
     who: &Identity,
     csrf: &str,
     error: Option<&str>,
+    theme: &str,
 ) -> String {
     let now = now_secs();
     let error_block = match error {
@@ -620,6 +634,7 @@ fn render_feeds(
         "",
         " cur-shell",
         Some(&who.email),
+        theme,
         &main,
         "",
     )
