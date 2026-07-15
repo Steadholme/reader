@@ -1,6 +1,6 @@
 # Crier
 
-**Single-user ActivityPub microblog — sovereign fediverse identity for the HOLDFAST estate.**
+**Single-user ActivityPub microblog — sovereign fediverse identity for the Steadholme estate.**
 
 Crier lets you own your social identity on the open social web: a local microblog (post + read
 notes) backed by a real ActivityPub actor, WebFinger discovery, and an outbox that any fediverse
@@ -28,7 +28,7 @@ default (the cellar `/v2/` precedent).
 Crier serves a **fully correct** actor / outbox / WebFinger and accepts inbound activities. Outbound
 delivery (Accept on Follow, Create fan-out) uses `reqwest` + **rustls** and is **unsigned**: Crier
 deliberately implements NO HTTP Signatures, because a signing stack risks pulling OpenSSL, which the
-HOLDFAST posture forbids. Consequences:
+Steadholme posture forbids. Consequences:
 
 - The actor document advertises **no `publicKey`**.
 - Remote servers that require signed delivery will reject Crier's pushes. That is acceptable

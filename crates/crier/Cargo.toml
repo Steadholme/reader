@@ -2,7 +2,7 @@
 name = "crier"
 version = "0.1.0"
 edition = "2021"
-description = "Crier — single-user ActivityPub microblog (sovereign fediverse identity) for the HOLDFAST stack."
+description = "Crier — single-user ActivityPub microblog (sovereign fediverse identity) for the Steadholme stack."
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -17,7 +17,7 @@ path = "src/main.rs"
 # HTTP framework (shared with keystone/inkwell/relay/cellar): State/Path/Query/Form extractors,
 # server-rendered HTML for the SSO timeline, typed JSON for the ActivityPub surface.
 axum = "0.8"
-# Shared HOLDFAST design system CSS layered before Crier's service-specific CSS.
+# Shared Steadholme design system CSS layered before Crier's service-specific CSS.
 odyssey = { path = "../odyssey" }
 # Async runtime axum runs on. The Store trait is async: handlers `.await` it directly and
 # PgStore drives sqlx natively, so a worker thread is NEVER blocked (no sync-over-async bridge).

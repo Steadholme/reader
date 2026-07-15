@@ -1,4 +1,4 @@
-//! Reader — one container hosting the HOLDFAST reading surfaces (read-later / RSS / social).
+//! Reader — one container hosting the Steadholme reading surfaces (read-later / RSS / social).
 //!
 //! Each surface is its OWN library crate (Magpie/Current/Crier), reused verbatim: same schema, same
 //! routes, same templates, same OWN database, same subdomain. This binary only adds a **Host-based
@@ -215,7 +215,7 @@ fn build_current_http_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(Duration::from_secs(10))
-        .user_agent("HOLDFAST-Current/0.1 (+https://rss.w33d.xyz)")
+        .user_agent("Steadholme-Current/0.1 (+https://rss.w33d.xyz)")
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .expect("build reqwest client")

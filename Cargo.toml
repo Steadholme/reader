@@ -2,7 +2,7 @@
 name = "reader"
 version = "0.1.0"
 edition = "2021"
-description = "Reader — one deployable hosting the HOLDFAST reading surfaces (read-later / RSS) behind a Host-based vhost demux. Each surface keeps its own database, routes, and subdomain; this binary just composes the two library crates so the estate runs one container instead of two."
+description = "Reader — one deployable hosting the Steadholme reading surfaces (read-later / RSS) behind a Host-based vhost demux. Each surface keeps its own database, routes, and subdomain; this binary just composes the two library crates so the estate runs one container instead of two."
 license = "MIT OR Apache-2.0"
 
 [[bin]]

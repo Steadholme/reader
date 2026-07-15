@@ -4,7 +4,7 @@
 //! carries the public ActivityPub / WebFinger surface.
 //!
 //! The shared design tokens / CSS are embedded (via `include_str!`) and inlined into every page,
-//! matching the HOLDFAST enterprise brand (the same look as the Keystone/inkwell UI): brand
+//! matching the Steadholme enterprise brand (the same look as the Keystone/inkwell UI): brand
 //! gradient, indigo accent, cards, app-bar.
 
 pub mod admin;
@@ -186,7 +186,7 @@ pub fn topbar(page_title: &str, email: &str) -> String {
     let (initials, name, sub) = identity_bits(ident);
     let header = format!(
         r#"<header class="appbar">
-  <a class="appbar__brand" href="/" aria-label="HOLDFAST Social">
+  <a class="appbar__brand" href="/" aria-label="Steadholme Social">
     <span class="app-tile" style="--app:#7c3aed;--app-soft:#f4f0fe" aria-hidden="true">{shield}</span>
     <span class="appbar__name"><b>Social</b><span>social.w33d.xyz</span></span>
   </a>
@@ -286,7 +286,7 @@ fn identity_bits(email: &str) -> (String, String, String) {
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "H".to_string());
-    (initials, e.to_string(), "HOLDFAST SSO".to_string())
+    (initials, e.to_string(), "Steadholme SSO".to_string())
 }
 
 /// Format epoch seconds as a compact UTC date `Mon D, YYYY` (e.g. `Jun 29, 2026`). std `time` only.

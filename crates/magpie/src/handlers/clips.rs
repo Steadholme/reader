@@ -202,7 +202,7 @@ pub async fn clip_form(
         .replace("{{URL_TEXT}}", &esc(&url))
         .replace("{{URL_HOST}}", &esc(parsed.host_str().unwrap_or("")));
     let html = page_shell(
-        "Save to HOLDFAST · Magpie",
+        "Save to Steadholme · Magpie",
         "Save",
         Some(&who.email),
         None,
@@ -1495,10 +1495,10 @@ fn render_index(
         <section class=\"card\">\
           <div class=\"card__head\"><h2>One-click bookmarklet</h2></div>\
           <div class=\"card__body\">\
-            <p class=\"hint\">Drag this button to your bookmarks bar. Click it on any page to save it to HOLDFAST.</p>\
+            <p class=\"hint\">Drag this button to your bookmarks bar. Click it on any page to save it to Steadholme.</p>\
             <p class=\"bookmarklet-wrap\">\
               <a class=\"btn btn-secondary bookmarklet\" href=\"{bookmarklet}\"\
-                 onclick=\"return false;\" draggable=\"true\">Save to HOLDFAST</a>\
+                 onclick=\"return false;\" draggable=\"true\">Save to Steadholme</a>\
             </p>\
             <p class=\"hint hint--muted\">It opens a small tab that saves the current page through your single sign-on session.</p>\
           </div>\
@@ -1508,7 +1508,7 @@ fn render_index(
         bookmarklet = esc(&bookmarklet_href(&state.config.public_base_url)),
     );
     page_shell(
-        "Reading list · Magpie · HOLDFAST",
+        "Reading list · Magpie · Steadholme",
         "Reading list",
         Some(&who.email),
         Some(query.filter.as_str()),
@@ -1981,7 +1981,7 @@ fn render_reader(clip: &Clip, who: &Identity, csrf: &str, highlights: &[Highligh
         )
         .replace("{{PROGRESS}}", &render_reader_progress(clip, csrf));
     page_shell(
-        &format!("{title} · Magpie · HOLDFAST"),
+        &format!("{title} · Magpie · Steadholme"),
         "Reader",
         Some(&who.email),
         None,
@@ -2246,7 +2246,7 @@ async fn render_highlights_page(
         .replace("{{ICON_HIGHLIGHT}}", ICON_HIGHLIGHT)
         .replace("{{BODY}}", &body);
     page_shell(
-        "Highlights · Magpie · HOLDFAST",
+        "Highlights · Magpie · Steadholme",
         "Highlights",
         Some(&who.email),
         Some("highlights"),
@@ -2295,7 +2295,7 @@ fn render_sites(who: &Identity, sites: &[(String, usize)]) -> String {
         .replace("{{ICON_GLOBE}}", ICON_GLOBE)
         .replace("{{BODY}}", &body);
     page_shell(
-        "Sources · Magpie · HOLDFAST",
+        "Sources · Magpie · Steadholme",
         "Sources",
         Some(&who.email),
         Some("sites"),
@@ -2400,7 +2400,7 @@ fn render_search(
         .replace("{{LIST}}", &list)
         .replace("{{MORE}}", &more);
     page_shell(
-        "Search · Magpie · HOLDFAST",
+        "Search · Magpie · Steadholme",
         "Search",
         Some(&who.email),
         None,

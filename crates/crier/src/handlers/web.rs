@@ -1769,7 +1769,7 @@ fn page_shell(
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
-<title>{tab_title} · Crier · HOLDFAST</title><style>{css}</style></head>
+<title>{tab_title} · Crier · Steadholme</title><style>{css}</style></head>
 <body class="page-reading">
 {topbar}
 <main class="crier-shell{solo}">

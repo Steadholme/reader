@@ -1,5 +1,5 @@
 /* Crier service surface, layered after Odyssey canonical CSS.
-   A leading social product (Mastodon/Bluesky calibre) on the HOLDFAST estate:
+   A leading social product (Mastodon/Bluesky calibre) on the Steadholme estate:
    a 600px feed spine + 300px sticky discovery rail under the shared Odyssey app-bar.
    Only two raw hex values are allowed — the social-purple brand pair that topbar()
    already inlines on the app-tile; everything else is an Odyssey token or color-mix. */

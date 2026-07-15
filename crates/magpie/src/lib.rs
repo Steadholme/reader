@@ -1,4 +1,4 @@
-//! Magpie — read-later / web clipper for the HOLDFAST stack.
+//! Magpie — read-later / web clipper for the Steadholme stack.
 //!
 //! Library root: defines [`AppState`], wires the routes via [`app`], and provides
 //! [`build_dev_state`] (in-memory store + real HTTP fetcher) and [`build_state_from_env`]

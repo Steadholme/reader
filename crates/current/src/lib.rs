@@ -1,4 +1,4 @@
-//! Current — enterprise RSS/Atom feed reader for the HOLDFAST stack.
+//! Current — enterprise RSS/Atom feed reader for the Steadholme stack.
 //!
 //! Library root: defines [`AppState`], wires the routes via [`app`], provides [`build_dev_state`]
 //! (in-memory store) and [`build_state_from_env`] (env-selected store), and the background feed
@@ -146,7 +146,7 @@ fn build_http_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(Duration::from_secs(10))
-        .user_agent("HOLDFAST-Current/0.1 (+https://rss.w33d.xyz)")
+        .user_agent("Steadholme-Current/0.1 (+https://rss.w33d.xyz)")
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .expect("build reqwest client")

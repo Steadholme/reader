@@ -57,7 +57,7 @@ fn article_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(DEFAULT_FETCH_TIMEOUT_SECS))
             .connect_timeout(Duration::from_secs(10))
-            .user_agent("HOLDFAST-Current/0.1 (+https://rss.w33d.xyz)")
+            .user_agent("Steadholme-Current/0.1 (+https://rss.w33d.xyz)")
             .redirect(Policy::none())
             .build()
             .expect("build article reqwest client")

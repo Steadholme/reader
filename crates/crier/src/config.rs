@@ -12,7 +12,7 @@ pub const DEFAULT_ACTOR: &str = "w33d";
 /// Default federation domain — the public host the actor ids resolve under.
 pub const DEFAULT_DOMAIN: &str = "social.w33d.xyz";
 /// Default profile summary shown on the actor + the timeline.
-pub const DEFAULT_SUMMARY: &str = "Sovereign microblog on the open social web — part of the HOLDFAST estate.";
+pub const DEFAULT_SUMMARY: &str = "Sovereign microblog on the open social web — part of the Steadholme estate.";
 /// Hard cap on how many notes the timeline / outbox render (keeps an unbounded list bounded).
 pub const LIST_LIMIT: usize = 200;
 /// Hard cap on a single note's content, in characters.

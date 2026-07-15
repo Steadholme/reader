@@ -5,7 +5,7 @@
 //! - [`feeds`] — feed management (`/feeds`): add by URL, remove.
 //!
 //! The shared design tokens / CSS are embedded (via `include_str!`) and inlined into every
-//! page, matching the HOLDFAST enterprise brand: brand gradient, Current azure, cards,
+//! page, matching the Steadholme enterprise brand: brand gradient, Current azure, cards,
 //! buttons, the app-bar with the shield + wordmark + signed-in email + logout. ALL
 //! producer-supplied AND remote feed text is HTML-escaped on render (defense-in-depth against
 //! stored XSS); the service injects NO raw HTML.
@@ -88,12 +88,12 @@ pub(crate) fn page_shell(
             "  <meta charset=\"utf-8\">\n",
             "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
             "  <meta name=\"color-scheme\" content=\"{color_scheme}\">\n",
-            "  <title>{title} · Current · HOLDFAST</title>\n",
+            "  <title>{title} · Current · Steadholme</title>\n",
             "  <style>{css}</style>\n",
             "</head>\n",
             "<body class=\"page-console\">\n",
             "  <header class=\"appbar\">\n",
-            "    <a class=\"appbar__brand\" href=\"/\" aria-label=\"HOLDFAST Current\">\n",
+            "    <a class=\"appbar__brand\" href=\"/\" aria-label=\"Steadholme Current\">\n",
             "      <span class=\"app-tile\" style=\"--app:#0369a1;--app-soft:#f0f9ff\" aria-hidden=\"true\">{shield}</span>\n",
             "      <span class=\"appbar__name\"><b>Current</b><span>rss.w33d.xyz</span></span>\n",
             "    </a>\n",
@@ -270,7 +270,7 @@ fn identity_bits(email: &str) -> (String, String, String) {
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "H".to_string());
-    (initials, e.to_string(), "HOLDFAST SSO".to_string())
+    (initials, e.to_string(), "Steadholme SSO".to_string())
 }
 
 /// Render the branded error page (used by [`crate::error::AppError`] and the not-found paths).

@@ -1,11 +1,11 @@
-# Current · HOLDFAST 订阅河
+# Current · Steadholme 订阅河
 
-**Current** 是 HOLDFAST 主权基建中的 RSS / Atom 阅读器，对应子域 **`rss.w33d.xyz`**，门户磁贴名
+**Current** 是 Steadholme 主权基建中的 RSS / Atom 阅读器，对应子域 **`rss.w33d.xyz`**，门户磁贴名
 **Feeds**。它由 Sluice 网关以 `auth=sso` 方式守护：网关完成 OIDC 登录后注入
 `X-Auth-Subject` / `X-Auth-Email`，Current 仅在内网可达、**自身不做任何登录**，直接信任这两个头
 作为当前订阅者（owner）。
 
-服务遵循 HOLDFAST 共享模板：Rust + axum、`async-trait` 的 Postgres 存储（运行期 sqlx 查询，无
+服务遵循 Steadholme 共享模板：Rust + axum、`async-trait` 的 Postgres 存储（运行期 sqlx 查询，无
 编译期宏、无 `block_in_place`、可移植标准 SQL）、独立数据库、幂等迁移、企业级内嵌 UI、POST 全部
 带 CSRF、对远程内容做 XSS 清洗、`healthcheck` 子命令、多阶段非 root Dockerfile、`GET /healthz`。
 

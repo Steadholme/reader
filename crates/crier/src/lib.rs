@@ -1,4 +1,4 @@
-//! Crier — single-user ActivityPub microblog (sovereign fediverse identity) for the HOLDFAST stack.
+//! Crier — single-user ActivityPub microblog (sovereign fediverse identity) for the Steadholme stack.
 //!
 //! Library root: defines [`AppState`], wires the routes via [`app`], and provides [`build_dev_state`]
 //! (in-memory store, audit off) and [`build_state_from_env`] (env-selected store + Watchtower audit).

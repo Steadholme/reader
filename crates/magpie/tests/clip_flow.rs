@@ -177,7 +177,7 @@ async fn save_list_read_archive_delete_lifecycle() {
     assert_eq!(home.status, StatusCode::OK);
     assert!(home.body.contains("Read later"));
     assert!(home.body.contains("Your reading list is empty"));
-    assert!(home.body.contains("Save to HOLDFAST")); // bookmarklet
+    assert!(home.body.contains("Save to Steadholme")); // bookmarklet
     assert!(home.body.contains("javascript:")); // draggable bookmarklet href
     let csrf = home.csrf_cookie().expect("csrf cookie on GET /");
 

@@ -2,7 +2,7 @@
 name = "current"
 version = "0.1.0"
 edition = "2021"
-description = "Current — enterprise RSS/Atom feed reader for the HOLDFAST stack (SSO-gated, background poller, unified river)."
+description = "Current — enterprise RSS/Atom feed reader for the Steadholme stack (SSO-gated, background poller, unified river)."
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -17,7 +17,7 @@ path = "src/main.rs"
 # HTTP framework (shared with keystone/pastefire/watchtower): Form/State/Path extractors,
 # typed responses, server-rendered HTML.
 axum = "0.8"
-# Shared HOLDFAST design system CSS layered before Current's service-specific CSS.
+# Shared Steadholme design system CSS layered before Current's service-specific CSS.
 odyssey = { path = "../odyssey" }
 # Async runtime axum runs on. The Store trait is async: handlers `.await` it directly, PgStore
 # uses sqlx natively, and the feed poller is a native-async Tokio task — a worker thread is
