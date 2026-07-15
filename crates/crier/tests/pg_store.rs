@@ -272,7 +272,7 @@ async fn pg_store_full_integration() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, "__Host-csrf=tok")
                 .header("x-auth-subject", "u_w33d")
-                .header("x-auth-email", "w@holdfast.local")
+                .header("x-auth-email", "w@steadholme.local")
                 .body(Body::from(body))
                 .unwrap(),
         )

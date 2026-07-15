@@ -224,7 +224,7 @@ async fn pg_store_full_integration() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, "__Host-csrf=tok")
                 .header("x-auth-subject", "u_http")
-                .header("x-auth-email", "http@holdfast.local")
+                .header("x-auth-email", "http@steadholme.local")
                 .body(Body::from("csrf_token=tok&url=https://invalid.invalid/feed.xml"))
                 .unwrap(),
         )
@@ -256,7 +256,7 @@ async fn pg_store_full_integration() {
             Request::builder()
                 .uri("/")
                 .header("x-auth-subject", "u_http")
-                .header("x-auth-email", "http@holdfast.local")
+                .header("x-auth-email", "http@steadholme.local")
                 .body(Body::empty())
                 .unwrap(),
         )

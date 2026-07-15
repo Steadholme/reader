@@ -14,7 +14,7 @@ use tower::ServiceExt;
 
 const ALICE: &str = "u_alice";
 const BOB: &str = "u_bob";
-const EMAIL: &str = "test@holdfast.local";
+const EMAIL: &str = "test@steadholme.local";
 const CSRF: &str = "tok";
 
 fn feed(id: &str, owner: &str, url: &str) -> Feed {

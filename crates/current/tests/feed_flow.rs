@@ -10,7 +10,7 @@ use current::{app, build_dev_state, now_secs, AppState};
 use tower::ServiceExt;
 
 const OWNER: &str = "u_test";
-const EMAIL: &str = "test@holdfast.local";
+const EMAIL: &str = "test@steadholme.local";
 
 fn feed(id: &str, owner: &str, url: &str) -> Feed {
     Feed {
