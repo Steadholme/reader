@@ -96,7 +96,7 @@ TEST_DATABASE_URL=postgres://postgres:pw@127.0.0.1:55482/magpie \
 docker rm -f magpie-testpg
 
 # 构建镜像并冒烟
-docker build -t holdfast/magpie:dev .
+docker build -t steadholme/magpie:dev .
 ```
 
 ## 部署要点（交给 deploy）

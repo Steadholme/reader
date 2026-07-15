@@ -99,12 +99,12 @@ TEST_DATABASE_URL=postgres://postgres:pw@127.0.0.1:55481/current \
 LIVE_FETCH=1 cargo test --test live_fetch -- --nocapture
 
 # 镜像 + 健康检查冒烟：
-docker build -t holdfast/current:dev .
+docker build -t steadholme/current:dev .
 ```
 
 ## 部署要点
 
-- 镜像 `holdfast/current:dev`，内网端口 **8970**，无对外发布端口。
+- 镜像 `steadholme/current:dev`，内网端口 **8970**，无对外发布端口。
 - 数据库 **`current`**（部署侧 `CREATE DATABASE current`），共用同一 Postgres 用户 / 口令。
 - Sluice 路由：host **`rss.w33d.xyz`** → `http://current:8970`，`auth=sso`。
 - Portal 磁贴名 **Feeds**；Beacon 组件 **Feeds**（`http://current:8970/healthz`）。
